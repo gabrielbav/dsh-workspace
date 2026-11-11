@@ -1,0 +1,5 @@
+# Mounts the Host half when the bundle is installed into a profile. The browser half (row button, menu items and
+# confirmation dialogs) is discovered from the `dsh.client` declaration in package.json.
+- insert:
+    - id: session-delete
+      name: dsh-plugin-session-delete
