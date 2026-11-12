@@ -1,8 +1,16 @@
 {
-  "name": "dsh-plugin-session-delete",
+  "name": "@gabrielbav/dsh-plugin-session-delete",
   "version": "0.1.0",
   "description": "Delete sessions and workspaces permanently from DeepSeek Harness: a Delete session action on every session row and a Delete workspace and sessions action on every workspace",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gabrielbav/dsh-plugin-session-delete.git"
+  },
+  "homepage": "https://github.com/gabrielbav/dsh-plugin-session-delete#readme",
+  "bugs": {
+    "url": "https://github.com/gabrielbav/dsh-plugin-session-delete/issues"
+  },
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
@@ -62,5 +70,8 @@
     "typescript": "^6.0.3",
     "vitest": "^4.1.11"
   },
-  "icon": "./icon.svg"
+  "icon": "./icon.svg",
+  "publishConfig": {
+    "access": "public"
+  }
 }

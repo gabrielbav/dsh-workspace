@@ -20,7 +20,7 @@ A session is kept, and the dialog says why, when:
 
 ## Sessions used since DSH started
 
-DSH keeps every session you chatted in loaded until it restarts. To delete one of those, the plugin asks the session controller to unload it with `releaseAgent`. That method is new in DSH ([pull request](#dsh-version)). The plugin detects it at runtime:
+DSH keeps every session you chatted in loaded until it restarts. To delete one of those, the plugin asks the session controller to unload it with `releaseAgent`. That method is not in upstream DSH yet; it is proposed in [gabrielbav/deepseek-harness#1](https://github.com/gabrielbav/deepseek-harness/pull/1). The plugin detects it at runtime:
 
 | DSH | Sessions not loaded | Idle sessions used since DSH started | Running sessions |
 |---|---|---|---|
@@ -31,10 +31,10 @@ On a DSH without the method, the confirmation dialog says so up front.
 
 ## Install
 
-From the Plugins page: **Add plugin** → `dsh-plugin-session-delete`, or a path to a checkout. From the command line:
+From the Plugins page: **Add plugin** → `@gabrielbav/dsh-plugin-session-delete`, or a path to a checkout. From the command line:
 
 ```sh
-dsh plugin --profile web add dsh-plugin-session-delete
+dsh plugin --profile web add @gabrielbav/dsh-plugin-session-delete
 ```
 
 Restart `dsh web` afterwards.
@@ -62,7 +62,7 @@ The Host half answers three owner-only routes: `/api/sessionDelete.capabilities`
 <a id="dsh-version"></a>
 ## DSH version
 
-`releaseAgent` is added to `@deepseek-ai/dsh-api-session-controller` by the change "feat(session-controller): release idle Agents for Host plugins". The plugin works without it, with the restart limitation above.
+`releaseAgent` is added to `@deepseek-ai/dsh-api-session-controller` by [gabrielbav/deepseek-harness#1](https://github.com/gabrielbav/deepseek-harness/pull/1), which is not merged upstream. Stock DSH does not have it, so there the plugin keeps sessions loaded since startup until DSH restarts.
 
 ## License
 

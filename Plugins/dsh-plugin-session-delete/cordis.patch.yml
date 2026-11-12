@@ -2,4 +2,4 @@
 # confirmation dialogs) is discovered from the `dsh.client` declaration in package.json.
 - insert:
     - id: session-delete
-      name: dsh-plugin-session-delete
+      name: "@gabrielbav/dsh-plugin-session-delete"
