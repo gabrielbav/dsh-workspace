@@ -110,7 +110,7 @@ export class DockerSubprocessRuntime extends LocalSubprocessRuntime {
     const execId = randomUUID()
     // User variables (defaults, then the session's own) first; the tool's explicit variables win.
     const env = { ...containerEnv(this.workspaces.environmentFor(record.sessionId)), ...containerEnv(spec.env) }
-    const argv = ['docker', ...this.workspaces.execArgv(record, supervisedArgv(execId, containerArgv(spec.argv)), spec.cwd, env, false)]
+    const argv = [this.workspaces.dockerBinary, ...this.workspaces.execArgv(record, supervisedArgv(execId, containerArgv(spec.argv)), spec.cwd, env, false)]
     const handle = super.spawn({ ...spec, argv, cwd: this.workspaces.config.dataDir, env: undefined, signal: undefined })
     const stop = (): void => {
       void this.killGroup(record, execId)
@@ -136,7 +136,7 @@ export class DockerSubprocessRuntime extends LocalSubprocessRuntime {
     const record = this.recordFor(spec.cwd)
     const execId = randomUUID()
     const env = { ...containerEnv(this.workspaces.environmentFor(record.sessionId)), ...containerEnv(spec.env), TERM: spec.terminalType }
-    const argv = ['docker', ...this.workspaces.execArgv(record, supervisedArgv(execId, containerArgv(spec.argv)), spec.cwd, env, true)]
+    const argv = [this.workspaces.dockerBinary, ...this.workspaces.execArgv(record, supervisedArgv(execId, containerArgv(spec.argv)), spec.cwd, env, true)]
     const handle = await super.spawnTerminal({ ...spec, argv, cwd: this.workspaces.config.dataDir, env: undefined })
     const terminate = async (): Promise<void> => {
       await this.killGroup(record, execId)

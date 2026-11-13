@@ -8,6 +8,7 @@
 import { chown, constants, cp, lchown, mkdir, open, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
+import { execFile as execFileCb } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { DockerCli } from './docker.ts'
 import { CACHE_TARGET, createArgs, execArgs, OWNER_LABEL, REQUIRED_RUNTIME, SESSION_LABEL, VOLUME_KIND_LABEL, WORKSPACE_LABEL, type CheckoutStorage, type ResourceLimits } from './container-spec.ts'
@@ -17,6 +18,7 @@ import type { RepositoryRef, SelfTestCheck, SelfTestReport, WorkspaceStatus, Wor
 
 export type { SelfTestReport, WorkspaceStatus } from '../types.ts'
 import type { EgressPolicy } from '../egress/policy.ts'
+import { closeConnection, pinHostKey, PREPARE_SCRIPT, remoteShell, RemoteError, type RemoteHost } from './remote.ts'
 
 /** Durable workspace record, stored as JSON in the data directory. */
 export interface WorkspaceRecord {
@@ -34,6 +36,8 @@ export interface WorkspaceRecord {
   readonly storage?: CheckoutStorage
   /** The checkout's Docker volume when {@link storage} is `volume`. */
   readonly volume?: string
+  /** The Docker host the workspace lives on: `local`, or `ssh://user@host:port`; absent means `local`. */
+  readonly backend?: string
   readonly path: string
   readonly mirrorPath: string
   readonly containerName: string
@@ -125,6 +129,14 @@ export interface WorkspaceManagerConfig {
    * Docker host and a Docker volume otherwise; `bind` and `volume` force one. Existing workspaces keep theirs.
    */
   storage?: 'auto' | CheckoutStorage
+  /**
+   * Run sandboxes on a remote Docker host over SSH instead of this computer. `dockerBinary` is the generated wrapper
+   * ({@link writeRemoteFiles}); `dir` holds Code's SSH config and pinned host key. Checkouts are then always volumes,
+   * extra read-only folders are skipped (they are on this computer), and the proxy's code and policy live in volumes.
+   */
+  readonly remote?: { readonly host: RemoteHost; readonly dir: string; readonly dockerBinary: string }
+  /** Remote settings that could not be used: the self test reports it and no new workspace starts anywhere. */
+  readonly remoteError?: string
   /** Whether the Harness sandbox mode of a session is read-only (its permission selector); read at container creation. */
   sessionReadOnly?: (sessionId: string) => boolean
   /** Default variables for every workspace; a session's own values override them by name. */
@@ -210,6 +222,16 @@ export class WorkspaceManager {
    * the workspaces anyway. The copy is outside `workspaces/`, so no sandbox can write to it.
    */
   private get proxySourceDir(): string { return join(this.config.dataDir, 'proxy') }
+  /** The `docker` to spawn for workspace processes: the remote wrapper, or `docker`. */
+  get dockerBinary(): string { return this.config.remote?.dockerBinary ?? 'docker' }
+  /** Which Docker host this manager drives; records of another one are left alone. */
+  get backend(): string {
+    const remote = this.config.remote?.host
+    return remote === undefined ? 'local' : `ssh://${remote.user}@${remote.host}:${remote.port}`
+  }
+  private onOtherBackend(record: WorkspaceRecord): boolean { return (record.backend ?? 'local') !== this.backend }
+  private get proxyCodeVolume(): string { return `${this.namespace}-proxy-code` }
+  private get policyVolume(): string { return `${this.namespace}-policy` }
 
   /**
    * Run the mandatory checks. Code stays disabled unless every check passes.
@@ -217,15 +239,24 @@ export class WorkspaceManager {
    */
   async selfTest(): Promise<SelfTestReport> {
     const checks: SelfTestCheck[] = []
+    if (this.config.remoteError !== undefined) return { ok: false, checks: [{ id: 'remote', ok: false, detail: this.config.remoteError, remedy: SETUP_REMEDIES.remote }] }
+    const remote = this.config.remote
+    if (remote !== undefined) {
+      const connection = await this.checkRemote()
+      checks.push(connection)
+      if (!connection.ok) return { ok: false, checks }
+    }
     const runtimes = await this.docker.runtimes()
     checks.push(runtimes.length > 0
       ? { id: 'docker', ok: true, detail: 'Docker daemon reachable' }
-      : { id: 'docker', ok: false, detail: 'Docker daemon not reachable', remedy: SETUP_REMEDIES.docker })
+      : remote !== undefined
+        ? { id: 'docker', ok: false, detail: 'Docker is not installed or not reachable on the remote VM', remedy: SETUP_REMEDIES.remotePrepare, action: 'prepare-remote' as const }
+        : { id: 'docker', ok: false, detail: 'Docker daemon not reachable', remedy: SETUP_REMEDIES.docker })
     if (runtimes.length === 0) return { ok: false, checks }
     const hasRunsc = runtimes.includes(REQUIRED_RUNTIME)
     checks.push(hasRunsc
       ? { id: 'runtime', ok: true, detail: 'runsc runtime registered' }
-      : { id: 'runtime', ok: false, detail: 'runsc runtime is not registered with Docker', remedy: SETUP_REMEDIES.runtime })
+      : { id: 'runtime', ok: false, detail: 'runsc runtime is not registered with Docker', ...remote === undefined ? { remedy: SETUP_REMEDIES.runtime } : { remedy: SETUP_REMEDIES.remotePrepare, action: 'prepare-remote' as const } })
     const image = await this.docker.tryExec(['image', 'inspect', '--format', '{{.Id}}', this.config.image])
     checks.push(image.code === 0
       ? { id: 'image', ok: true, detail: `worker image ${this.config.image} present (${image.stdout.trim().slice(0, 19)})` }
@@ -234,17 +265,22 @@ export class WorkspaceManager {
       const probe = await this.docker.tryExec(['run', '--rm', '--runtime', REQUIRED_RUNTIME, '--network', 'none', this.config.image, 'sh', '-c', 'dmesg 2>/dev/null | head -n 3; id -u'])
       const isolated = probe.code === 0 && /gVisor/i.test(probe.stdout)
       checks.push({ id: 'isolation', ok: isolated, detail: isolated ? 'container kernel is gVisor' : `gVisor probe failed: ${probe.stderr.trim() || probe.stdout.trim()}`, ...(isolated ? {} : { remedy: SETUP_REMEDIES.runtime }) })
-      await mkdir(join(this.config.dataDir, 'workspaces'), { recursive: true })
-      const reach = await this.docker.tryExec(['run', '--rm', '--runtime', REQUIRED_RUNTIME, '--network', 'none', '--user', `${this.config.uid}:${this.config.gid}`,
-        '--mount', `type=bind,source=${join(this.config.dataDir, 'workspaces')},target=/probe,readonly`, this.config.image, 'ls', '/probe'])
-      checks.push(reach.code === 0
-        ? { id: 'data-dir', ok: true, detail: 'workspace folder is reachable by the container user' }
-        : { id: 'data-dir', ok: false, detail: `the container user ${this.config.uid} cannot reach ${this.config.dataDir}`, remedy: SETUP_REMEDIES.dataDir })
+      // Host folders matter only when Docker runs on this computer.
+      if (remote === undefined) {
+        await mkdir(join(this.config.dataDir, 'workspaces'), { recursive: true })
+        const reach = await this.docker.tryExec(['run', '--rm', '--runtime', REQUIRED_RUNTIME, '--network', 'none', '--user', `${this.config.uid}:${this.config.gid}`,
+          '--mount', `type=bind,source=${join(this.config.dataDir, 'workspaces')},target=/probe,readonly`, this.config.image, 'ls', '/probe'])
+        checks.push(reach.code === 0
+          ? { id: 'data-dir', ok: true, detail: 'workspace folder is reachable by the container user' }
+          : { id: 'data-dir', ok: false, detail: `the container user ${this.config.uid} cannot reach ${this.config.dataDir}`, remedy: SETUP_REMEDIES.dataDir })
+      }
       this.storageChoice = this.probeStorage()
       const storage = await this.storageChoice
       checks.push(storage === undefined
         ? { id: 'writable', ok: false, detail: 'the sandbox user can write neither a host folder nor a Docker volume', remedy: SETUP_REMEDIES.dataDir }
-        : storage === 'bind'
+        : remote !== undefined
+          ? { id: 'writable', ok: true, detail: 'checkouts live in Docker volumes on the remote VM' }
+          : storage === 'bind'
           ? { id: 'writable', ok: true, detail: 'checkouts live in host folders the sandbox user can write' }
           : this.config.storage === 'bind'
             ? { id: 'writable', ok: true, warning: true, detail: 'the sandbox user cannot write host folders on this Docker host', remedy: SETUP_REMEDIES.storage }
@@ -258,11 +294,44 @@ export class WorkspaceManager {
     return { ok: checks.every(c => c.ok), checks }
   }
 
+  /**
+   * Pin the VM's host key and log in once. Fails with the reason (no answer, a different host key, the key file
+   * refused) and how to fix it.
+   */
+  private async checkRemote(): Promise<SelfTestCheck> {
+    const remote = this.config.remote!
+    try {
+      await pinHostKey(remote.dir, remote.host)
+    } catch (error) {
+      return { id: 'remote', ok: false, detail: error instanceof Error ? error.message : String(error), remedy: SETUP_REMEDIES.remote }
+    }
+    const login = await remoteShell(remote.dir, 'uname -sm')
+    if (login.code !== 0) return { id: 'remote', ok: false, detail: `SSH login to the remote VM failed: ${login.stderr.trim().split('\n').slice(-1)[0] ?? 'no output'}`, remedy: SETUP_REMEDIES.remote }
+    return { id: 'remote', ok: true, detail: `remote VM reachable over SSH, host key pinned (${login.stdout.trim()})` }
+  }
+
+  /**
+   * Install Docker and gVisor on the remote VM and give the login Docker access ({@link PREPARE_SCRIPT}). Runs only
+   * on the user's request from the setup notice; needs passwordless sudo on the VM.
+   * @returns the script's output.
+   */
+  async prepareRemote(): Promise<string> {
+    const remote = this.config.remote
+    if (remote === undefined) throw new WorkspaceError('not-found', 'no remote Docker host is configured')
+    await pinHostKey(remote.dir, remote.host).catch((error: unknown) => { throw new WorkspaceError('unsafe-state', error instanceof RemoteError ? error.message : String(error)) })
+    const result = await remoteShell(remote.dir, 'sh -s', PREPARE_SCRIPT, 15 * 60_000)
+    // A new login picks up the docker group.
+    await closeConnection(remote.dir)
+    const log = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-20).join('\n')
+    if (result.code !== 0) throw new WorkspaceError('provision-failed', `preparing the remote VM failed:\n${log}`)
+    return log
+  }
+
   /** Result of the last storage probe, shared by provisioning and the self test. */
   private storageChoice: Promise<CheckoutStorage | undefined> | undefined
 
   /** Labels on every volume this manager owns. */
-  private volumeLabels(kind: 'checkout' | 'cache' | 'probe', workspaceId?: string): string[] {
+  private volumeLabels(kind: 'checkout' | 'cache' | 'probe' | 'proxy', workspaceId?: string): string[] {
     return [`${OWNER_LABEL}=${this.owner}`, `${VOLUME_KIND_LABEL}=${kind}`, ...workspaceId === undefined ? [] : [`${WORKSPACE_LABEL}=${workspaceId}`]]
   }
 
@@ -290,7 +359,7 @@ export class WorkspaceManager {
   private async probeStorage(): Promise<CheckoutStorage | undefined> {
     const user = `${this.config.uid}:${this.config.gid}`
     const write = 'mkdir -p /probe/d/e && echo ok > /probe/d/e/f && rm -r /probe/d'
-    if (this.config.storage !== 'volume') {
+    if (this.config.storage !== 'volume' && this.config.remote === undefined) {
       const dir = join(this.config.dataDir, 'workspaces', `.write-probe-${randomUUID().slice(0, 8)}`)
       await mkdir(dir, { recursive: true })
       await chownTree(dir, this.config.uid, this.config.gid)
@@ -317,6 +386,7 @@ export class WorkspaceManager {
 
   /** Storage for a new checkout: forced by config, or the probe's answer (cached). */
   private async storageFor(): Promise<CheckoutStorage> {
+    if (this.config.remote !== undefined) return 'volume'
     if (this.config.storage === 'bind' || this.config.storage === 'volume') return this.config.storage
     this.storageChoice ??= this.probeStorage()
     const choice = await this.storageChoice
@@ -361,6 +431,8 @@ export class WorkspaceManager {
   /** Load records from disk and reconcile them against Docker state. */
   async reconcile(): Promise<{ orphansRemoved: string[]; offline: string[] }> {
     await mkdir(this.recordsDir, { recursive: true })
+    // SSH refuses the VM until its host key is checked against the fingerprint in Settings.
+    if (this.config.remote !== undefined) await pinHostKey(this.config.remote.dir, this.config.remote.host)
     // A running proxy reloads this file, so a policy saved while Harness was down applies now.
     await this.updatePolicy(this.config.policy)
     await mkdir(join(this.config.dataDir, 'overrides'), { recursive: true, mode: 0o700 })
@@ -426,6 +498,11 @@ export class WorkspaceManager {
         await this.delete(record.sessionId).catch(() => undefined)
         continue
       }
+      if (this.onOtherBackend(record)) {
+        // It lives on the other Docker host (local vs remote); switching back brings it back.
+        if (record.status !== 'offline') await this.setStatus(record, 'offline')
+        continue
+      }
       const info = await this.docker.inspect(record.containerName)
       if (info === undefined || !info.running || info.runtime !== REQUIRED_RUNTIME) {
         await this.setStatus(record, 'offline')
@@ -442,7 +519,7 @@ export class WorkspaceManager {
   async ensureNetwork(): Promise<void> {
     await mkdir(join(this.config.dataDir, 'egress'), { recursive: true })
     await cp(this.config.proxyDir, this.proxySourceDir, { recursive: true, force: true })
-    await writeFile(this.policyPath, JSON.stringify(this.composedPolicy()), { mode: 0o644 })
+    await this.writePolicy()
     await this.docker.ensureNetwork(this.internalNetwork, ['--internal', '--driver', 'bridge', '--label', `${OWNER_LABEL}=${this.owner}`])
     await this.docker.ensureNetwork(this.egressNetwork, ['--driver', 'bridge', '--label', `${OWNER_LABEL}=${this.owner}`])
     // A running proxy keeps the code it started with; recreate it when the shipped code changed (an upgrade).
@@ -451,6 +528,9 @@ export class WorkspaceManager {
     if (info?.running === true && info.labels[PROXY_VERSION_LABEL] === version) return
     const before = info?.running === true ? await this.proxyAddress().catch(() => undefined) : undefined
     if (info !== undefined) await this.docker.removeContainer(this.proxyContainer)
+    if (this.config.remote !== undefined) await this.uploadProxyCode()
+    const codeMount = this.config.remote === undefined ? `type=bind,source=${this.proxySourceDir}` : `type=volume,source=${this.proxyCodeVolume}`
+    const policyMount = this.config.remote === undefined ? `type=bind,source=${this.config.dataDir}/egress` : `type=volume,source=${this.policyVolume}`
     await this.docker.exec([
       // The proxy is dsh-code's own trusted code, not workspace code. It runs
       // under the default runtime because it must resolve names through the
@@ -460,8 +540,8 @@ export class WorkspaceManager {
       '--user', '65534:65534', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--read-only', '--pids-limit', '256', '--memory', '256m', '--restart', 'unless-stopped',
       '--network', this.egressNetwork,
-      '--mount', `type=bind,source=${this.proxySourceDir},target=/opt/egress/src,readonly`,
-      '--mount', `type=bind,source=${this.config.dataDir}/egress,target=/opt/egress/policy,readonly`,
+      '--mount', `${codeMount},target=/opt/egress/src,readonly`,
+      '--mount', `${policyMount},target=/opt/egress/policy,readonly`,
       this.config.proxyImage, 'node', `/opt/egress/src/${existsSync(join(this.proxySourceDir, 'entry.js')) ? 'entry.js' : 'entry.ts'}`, '/opt/egress/policy/policy.json', String(PROXY_PORT),
     ])
     await this.docker.exec(['network', 'connect', '--alias', this.proxyContainer, this.internalNetwork, this.proxyContainer])
@@ -506,8 +586,38 @@ export class WorkspaceManager {
   }
 
   private async writePolicy(): Promise<void> {
+    const text = JSON.stringify(this.composedPolicy())
     await mkdir(join(this.config.dataDir, 'egress'), { recursive: true })
-    await writeFile(this.policyPath, JSON.stringify(this.composedPolicy()), { mode: 0o644 })
+    await writeFile(this.policyPath, text, { mode: 0o644 })
+    if (this.config.remote !== undefined && text !== this.uploadedPolicy) {
+      // The proxy on the VM reads its policy from a volume there; replace it atomically so a reload never sees half.
+      await this.docker.ensureVolume(this.policyVolume, this.volumeLabels('proxy'))
+      await this.docker.stream([...this.proxyHelper(this.policyVolume, '/p'), 'sh', '-c', 'cat > /p/.policy.json && chmod 644 /p/.policy.json && mv /p/.policy.json /p/policy.json'], { input: this.policyPath })
+      this.uploadedPolicy = text
+    }
+  }
+
+  /** The policy last written to the remote volume, so unchanged policies are not uploaded again. */
+  private uploadedPolicy: string | undefined
+
+  /** A one-shot container of the proxy image on one volume, for Code's own files on a remote Docker host. */
+  private proxyHelper(volume: string, target: string): string[] {
+    return ['run', '--rm', '-i', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--label', `${OWNER_LABEL}=${this.owner}`,
+      '--mount', `type=volume,source=${volume},target=${target}`, this.config.proxyImage]
+  }
+
+  /** Copy the proxy's code into its volume on the remote VM (a tar of the copy in dataDir). */
+  private async uploadProxyCode(): Promise<void> {
+    const archive = join(this.config.dataDir, 'egress', 'proxy-code.tar')
+    await new Promise<void>((resolveTar, rejectTar) => {
+      execFileCb('tar', ['-C', this.proxySourceDir, '-cf', archive, '.'], (error) => { if (error === null) resolveTar(); else rejectTar(error) })
+    })
+    try {
+      await this.docker.ensureVolume(this.proxyCodeVolume, this.volumeLabels('proxy'))
+      await this.docker.stream([...this.proxyHelper(this.proxyCodeVolume, '/code'), 'sh', '-c', 'find /code -mindepth 1 -delete && tar -xf - -C /code --no-same-owner && chmod -R a+rX /code'], { input: archive })
+    } finally {
+      await rm(archive, { force: true })
+    }
   }
 
   /**
@@ -688,6 +798,9 @@ export class WorkspaceManager {
    */
   provision(sessionId: string, repository: RepositoryRef, baseBranch: string, onProgress: (step: string, detail?: string) => void = () => {}, account: string = ''): Promise<WorkspaceRecord> {
     const existing = this.records.get(sessionId)
+    if (existing !== undefined && this.onOtherBackend(existing)) {
+      return Promise.reject(new WorkspaceError('unsafe-state', `[sandbox: the Code workspace is offline] this session's workspace lives on ${existing.backend === undefined || existing.backend === 'local' ? 'this computer' : 'the remote VM'}, and Code now uses ${this.config.remote === undefined ? 'this computer' : 'the remote VM'}. Switch Settings > Code > Remote Docker host back to reach it, or start a new session.`))
+    }
     if (existing !== undefined && existing.status === 'ready') return Promise.resolve(existing)
     const inflight = this.pending.get(sessionId)
     if (inflight !== undefined) return inflight
@@ -704,6 +817,10 @@ export class WorkspaceManager {
     const lockdown = this.config.lockdown === true
     const folders: string[] = []
     for (const folder of lockdown ? [] : this.config.readOnlyFolders ?? []) {
+      if (this.config.remote !== undefined) {
+        onProgress('folder-skipped', `${folder}: it is on this computer, and the sandbox runs on the remote VM`)
+        continue
+      }
       const dataDir = resolve(this.config.dataDir)
       const reason = unsafeFolderReason(folder)
         ?? (folder === dataDir || folder.startsWith(`${dataDir}/`) || dataDir.startsWith(`${folder}/`) ? 'it overlaps the Code data folder' : undefined)
@@ -797,6 +914,7 @@ export class WorkspaceManager {
   }
 
   private async doProvision(sessionId: string, repository: RepositoryRef, baseBranch: string, onProgress: (step: string, detail?: string) => void, account: string): Promise<WorkspaceRecord> {
+    if (this.config.remoteError !== undefined) throw new WorkspaceError('unsafe-state', `the remote Docker host settings cannot be used: ${this.config.remoteError}`)
     const live = [...this.records.values()].filter(r => r.status !== 'deleted' && r.sessionId !== sessionId).length
     if (live >= this.config.maxWorkspaces) throw new WorkspaceError('limit-reached', `at most ${this.config.maxWorkspaces} Code workspaces may run on this host`)
     onProgress('checking-runtime')
@@ -842,7 +960,7 @@ export class WorkspaceManager {
         await chownTree(path, this.config.uid, this.config.gid)
       }
       record = {
-        storage, ...volume === undefined ? {} : { volume },
+        storage, ...volume === undefined ? {} : { volume }, backend: this.backend,
         workspaceId, sessionId, repository, ...account === '' ? {} : { account }, baseBranch, baseCommit, workingBranch,
         path, mirrorPath, containerName: `${this.namespace}-${workspaceId.slice(0, 12)}`, image: this.config.image,
         runtime: REQUIRED_RUNTIME, status: 'provisioning', createdAt: now, updatedAt: now,
@@ -996,8 +1114,12 @@ export class WorkspaceManager {
     const record = this.records.get(sessionId)
     if (record === undefined) return
     await this.setStatus(record, 'deleting')
-    await this.docker.removeContainer(record.containerName)
-    if (record.volume !== undefined) await this.docker.removeVolume(record.volume)
+    // On the other Docker host, its container and volume are orphans once the record is gone: the next start on
+    // that host removes them.
+    if (!this.onOtherBackend(record)) {
+      await this.docker.removeContainer(record.containerName)
+      if (record.volume !== undefined) await this.docker.removeVolume(record.volume)
+    }
     await rm(record.path, { recursive: true, force: true })
     await rm(record.mirrorPath, { recursive: true, force: true })
     await this.setStatus(record, 'deleted')
@@ -1019,7 +1141,7 @@ export class WorkspaceManager {
   async checkHealth(): Promise<string[]> {
     const offline: string[] = []
     for (const record of this.records.values()) {
-      if (record.status !== 'ready') continue
+      if (record.status !== 'ready' || this.onOtherBackend(record)) continue
       const info = await this.docker.inspect(record.containerName).catch(() => 'unknown' as const)
       if (info === 'unknown') continue
       if (info === undefined || !info.running) {
@@ -1052,6 +1174,8 @@ export const SETUP_REMEDIES = {
   docker: 'Install Docker Engine (https://docs.docker.com/engine/install/) and start it, then make sure the user running Harness may use it.',
   runtime: 'Install gVisor (https://gvisor.dev/docs/user_guide/install/), register it with `sudo runsc install`, then `sudo systemctl reload docker`. Code never falls back to ordinary Docker.',
   image: (image: string): string => `Build the worker image: \`docker build -t ${image} <package>/worker\` after \`pnpm run build\`, or use Build worker image.`,
+  remote: 'Check Settings > Code > Remote Docker host: the address and SSH port, the login, the private key file on this computer, and the host key fingerprint of the VM (docs/remote.md shows how to read it on Azure and AWS). The VM must accept SSH from this computer.',
+  remotePrepare: 'Use Prepare the VM: Code logs in over SSH and installs Docker and gVisor with sudo (Ubuntu, Debian, Amazon Linux, Fedora), then adds the login to the docker group. Or install them by hand as docs/remote.md describes.',
   storage: 'Set Checkout storage to Automatic in Settings > Code: new checkouts then live in Docker volumes, which the sandbox user can write.',
   dataDir: 'Choose a data folder the container user can traverse, outside a private home directory (Settings > Code needs a restart for this one, or set dataDir in cordis.patch.yml).',
 } as const

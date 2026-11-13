@@ -172,10 +172,11 @@ function fail(res: ServerResponse, status: number, message: string): void {
 /**
  * Turn `docker` relay arguments into a connection for {@link PreviewResolver}.
  * @param argv - argv after `docker` (see WorkspaceManager.previewRelayArgv).
+ * @param binary - the `docker` to run (WorkspaceManager.dockerBinary).
  * @returns a duplex over the exec's stdin/stdout; closing it ends the exec.
  */
-export function relayConnection(argv: readonly string[]): Duplex {
-  const child = spawn('docker', [...argv], { stdio: ['pipe', 'pipe', 'ignore'] })
+export function relayConnection(argv: readonly string[], binary = 'docker'): Duplex {
+  const child = spawn(binary, [...argv], { stdio: ['pipe', 'pipe', 'ignore'] })
   const stream = Duplex.from({ readable: child.stdout, writable: child.stdin })
   stream.on('close', () => { child.kill() })
   child.on('error', (error) => { stream.destroy(error) })

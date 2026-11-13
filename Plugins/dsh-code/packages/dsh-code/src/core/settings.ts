@@ -7,6 +7,7 @@ import { normalizeHost } from '../egress/policy.ts'
 import type { CodeSettings } from '../types.ts'
 import { environmentLines, EnvironmentError, parseEnvironment } from './environment.ts'
 import { unsafeFolderReason } from './mounts.ts'
+import { RemoteError, validateRemote } from './remote.ts'
 
 /** Structured validation failure naming the field. */
 export class SettingsError extends Error {
@@ -43,6 +44,18 @@ function ports(field: keyof CodeSettings, value: unknown): number[] {
 export function validateSettings(input: CodeSettings): CodeSettings {
   if (input.network !== 'allowlist' && input.network !== 'none' && input.network !== 'open') throw new SettingsError('network', 'must be allowlist, none or open')
   if (input.storage !== 'auto' && input.storage !== 'bind' && input.storage !== 'volume') throw new SettingsError('storage', 'must be auto, bind or volume')
+  for (const field of ['remoteHost', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey'] as const) {
+    if (typeof input[field] !== 'string') throw new SettingsError(field, 'must be text')
+  }
+  let remote = { host: '', port: typeof input.remotePort === 'number' ? input.remotePort : 22, user: input.remoteUser.trim(), identityFile: input.remoteIdentityFile.trim(), hostKey: input.remoteHostKey.trim() }
+  if (input.remoteHost.trim() !== '') {
+    try {
+      remote = validateRemote({ ...remote, host: input.remoteHost })
+    } catch (error) {
+      if (error instanceof RemoteError) throw new SettingsError(REMOTE_FIELD_OF[error.field === 'connection' ? 'host' : error.field], error.message)
+      throw error
+    }
+  }
   if (!Array.isArray(input.allow) || input.allow.length > 512) throw new SettingsError('allow', 'must be a list of at most 512 host names')
   const allow = [...new Set(input.allow.map((pattern) => {
     const wildcard = typeof pattern === 'string' && pattern.startsWith('*.')
@@ -102,11 +115,17 @@ export function validateSettings(input: CodeSettings): CodeSettings {
     previewEnabled: input.previewEnabled,
     isolatedBrowser: input.isolatedBrowser,
     storage: input.storage,
+    remoteHost: remote.host, remotePort: remote.port, remoteUser: remote.user, remoteIdentityFile: remote.identityFile, remoteHostKey: remote.hostKey,
   }
 }
 
 /** Config fields Settings > Code edits; all apply without restarting Harness. */
 export const SETTINGS_FIELDS = ['network', 'allow', 'privateAllow', 'ports', 'cpus', 'memoryMb', 'pids', 'tmpMb', 'maxWorkspaces', 'workerImage', 'previewPorts', 'disabledAccounts', 'newBranch', 'shmMb', 'readOnlyWorkspace', 'dependencyCache', 'readOnlyFolders', 'environment', 'lockdown', 'previewEnabled', 'isolatedBrowser', 'storage'] as const satisfies ReadonlyArray<keyof CodeSettings>
+
+/** Remote Docker host fields: saved from Settings > Code, but changing them reloads Code instead of applying live. */
+export const REMOTE_FIELDS = ['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey'] as const satisfies ReadonlyArray<keyof CodeSettings>
+
+const REMOTE_FIELD_OF = { host: 'remoteHost', port: 'remotePort', user: 'remoteUser', identityFile: 'remoteIdentityFile', hostKey: 'remoteHostKey' } as const
 
 /**
  * Whether two configs differ only in live-applicable settings.

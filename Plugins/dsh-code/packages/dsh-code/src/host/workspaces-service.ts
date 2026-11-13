@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
 import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { mkdirSync, realpathSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import z from '@deepseek-ai/schemastery'
@@ -22,10 +23,12 @@ import { WorkspaceError, WorkspaceManager, type WorkspaceManagerConfig, type Wor
 import { EnvironmentError, environmentLines, parseEnvironment } from '../core/environment.ts'
 import { GitHubProvider, SourceControlError } from '../core/github.ts'
 import type { AccountRepositories, BranchList, BrowserAction, GhAccount, IsolatedFrame, PreviewTargets, ProvisionStep, SessionOverrides, SessionOverridesView, SessionVariables, CodeSessionView, CodeSettings, CodeSettingsView, PendingWork, PushResult, RepositorySummary, SelfTestReport, SessionEnvironment, WorkspaceUsage } from '../types.ts'
-import { onlySettingsChanged, SETTINGS_FIELDS, SettingsError, validateSettings } from '../core/settings.ts'
+import { onlySettingsChanged, REMOTE_FIELDS, SETTINGS_FIELDS, SettingsError, validateSettings } from '../core/settings.ts'
 import { PREVIEW_PREFIX, PreviewProxy, relayConnection } from './preview.ts'
 import { IsolatedBrowsers } from './browser.ts'
 import { Git, gitRunner } from '../core/git.ts'
+import { DockerCli, processRunner } from '../core/docker.ts'
+import { RemoteError as RemoteSettingsError, validateRemote, writeRemoteFiles } from '../core/remote.ts'
 import { DEFAULT_ALLOW, type EgressMode } from '../egress/policy.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -62,6 +65,11 @@ export interface Config {
   ports: number[]
   previewPorts: number[]
   presetId: string
+  remoteHost: string
+  remotePort: number
+  remoteUser: string
+  remoteIdentityFile: string
+  remoteHostKey: string
   defaultAccount: string
   disabledAccounts: string[]
   newBranch: boolean
@@ -103,6 +111,11 @@ export const Config: z<Config> = z.object({
   lockdown: z.boolean().default(false).description('Network none, read-only workspace, no cache and no extra folders'),
   previewEnabled: z.boolean().default(true).description('Preview tab for Code sessions; a session can override it'),
   isolatedBrowser: z.boolean().default(false).description('Preview through Chromium inside the sandbox; a session can override it; Lockdown forces it'),
+  remoteHost: z.string().default('').description('Remote Docker host (Azure VM, AWS EC2, any SSH host): empty runs sandboxes on this computer'),
+  remotePort: z.number().default(22).description('SSH port of the remote Docker host'),
+  remoteUser: z.string().default('').description('SSH login on the remote Docker host; it needs Docker access there'),
+  remoteIdentityFile: z.string().default('').description('Private key file on this computer for the remote Docker host'),
+  remoteHostKey: z.string().default('').description('SHA256 host key fingerprint of the remote Docker host; any other key is refused'),
   storage: z.union(['auto', 'bind', 'volume'] as const).default('auto').description('Where new checkouts live: auto picks a host folder when the sandbox user can write one, else a Docker volume'),
   newBranch: z.boolean().default(true).description('Give each Code session its own dsh-code/<hash> branch; false works on the chosen branch'),
   defaultAccount: z.string().default('').description('GitHub account (gh login) new Code sessions use; empty uses the gh CLI active account'),
@@ -158,6 +171,24 @@ function settingsOf(config: Config): CodeSettings {
     shmMb: config.shmMb, readOnlyWorkspace: config.readOnlyWorkspace, dependencyCache: config.dependencyCache,
     readOnlyFolders: config.readOnlyFolders, environment: config.environment, lockdown: config.lockdown,
     previewEnabled: config.previewEnabled, isolatedBrowser: config.isolatedBrowser, storage: config.storage,
+    remoteHost: config.remoteHost, remotePort: config.remotePort, remoteUser: config.remoteUser,
+    remoteIdentityFile: config.remoteIdentityFile, remoteHostKey: config.remoteHostKey,
+  }
+}
+
+/**
+ * The remote Docker host from the row config: none when no host is set, the generated SSH files when the settings
+ * are valid, or the reason they are not (Code then starts no workspace rather than falling back to this computer).
+ */
+function remoteOf(config: Config, dataDir: string): Pick<WorkspaceManagerConfig, 'remote' | 'remoteError'> {
+  if (config.remoteHost.trim() === '') return {}
+  try {
+    const host = validateRemote({ host: config.remoteHost, port: config.remotePort, user: config.remoteUser, identityFile: config.remoteIdentityFile, hostKey: config.remoteHostKey })
+    const which = (name: string): string => execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim()
+    const dir = join(dataDir, 'remote')
+    return { remote: { host, dir, dockerBinary: writeRemoteFiles(dir, host, { ssh: which('ssh'), docker: which('docker') }) } }
+  } catch (error) {
+    return { remoteError: error instanceof RemoteSettingsError ? `${error.field}: ${error.message}` : `the remote Docker host cannot be used: ${String(error)}` }
   }
 }
 
@@ -200,6 +231,7 @@ export class CodeWorkspacesService extends TypertRemoteService {
     // Canonical, so the checkout path is the same string on the host and in the container.
     mkdirSync(config.dataDir, { recursive: true })
     const dataDir = realpathSync(config.dataDir)
+    const remote = remoteOf(config, dataDir)
     this.manager = new WorkspaceManager({
       dataDir, image: config.workerImage, proxyImage: config.proxyImage,
       proxyDir: join(import.meta.dirname, '..', 'egress'),
@@ -210,11 +242,12 @@ export class CodeWorkspacesService extends TypertRemoteService {
       ...sandboxOptions(config),
       sessionReadOnly: sessionId => this.harnessMode(sessionId) === 'read-only',
       storage: config.storage,
-    }, undefined, new Git(gitRunner('git', ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential'])),
+      ...remote,
+    }, remote.remote === undefined ? undefined : new DockerCli(processRunner(remote.remote.dockerBinary), remote.remote.dockerBinary), new Git(gitRunner('git', ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential'])),
     async account => this.github.credentials(account))
     this.previews = new PreviewProxy(async (sessionId, port) => {
       const argv = await this.manager.previewRelayArgv(sessionId, port)
-      return { port, connect: () => relayConnection(argv) }
+      return { port, connect: () => relayConnection(argv, this.manager.dockerBinary) }
     })
     // Settings > Code changes apply in place; anything else restarts the plugin as usual.
     ctx.on('internal/update', (next: Config, restart) => {
@@ -442,10 +475,11 @@ export class CodeWorkspacesService extends TypertRemoteService {
     const applied = record?.options
     const lockdown = applied?.lockdown ?? this.config.lockdown
     const options = applied !== undefined
-      ? { readOnlyWorkspace: applied.readOnlyWorkspace, dependencyCache: applied.cacheDir !== undefined || applied.cacheVolume !== undefined, readOnlyFolders: applied.readOnlyFolders, shmMb: applied.shmMb, lockdown, storage: record?.storage ?? 'bind' }
+      ? { readOnlyWorkspace: applied.readOnlyWorkspace, dependencyCache: applied.cacheDir !== undefined || applied.cacheVolume !== undefined, readOnlyFolders: applied.readOnlyFolders, shmMb: applied.shmMb, lockdown, storage: record?.storage ?? 'bind', remote: (record?.backend ?? 'local') !== 'local' }
       : {
         readOnlyWorkspace: lockdown || this.config.readOnlyWorkspace, dependencyCache: !lockdown && this.config.dependencyCache,
         readOnlyFolders: lockdown ? [] : this.config.readOnlyFolders, shmMb: this.config.shmMb, lockdown,
+        remote: this.manager.config.remote !== undefined,
       }
     // The host's folder layout, container name, runtime and image stay on the host: the tab shows what the
     // session works on and how it is fenced, not where things live.
@@ -521,10 +555,12 @@ export class CodeWorkspacesService extends TypertRemoteService {
     }
     const editor = this.ctx.get('configEditor' as never) as ConfigEditorFace | undefined
     const entry = this.entry
-    const patch = Object.fromEntries(SETTINGS_FIELDS.map(field => [field, valid[field]]))
+    const patch = Object.fromEntries([...SETTINGS_FIELDS, ...REMOTE_FIELDS].map(field => [field, valid[field]]))
+    // The Docker host is fixed for the life of this row: changing it reloads Code with the new host.
+    const remoteChanged = REMOTE_FIELDS.some(field => valid[field] !== this.config[field])
     if (editor === undefined || entry === undefined) {
       // No profile editor: apply for this run only.
-      await this.apply({ ...this.config, ...patch } as Config)
+      if (!remoteChanged) await this.apply({ ...this.config, ...patch } as Config)
       return { settings: settingsOf(this.config), writable: false }
     }
     try {
@@ -533,12 +569,27 @@ export class CodeWorkspacesService extends TypertRemoteService {
     } catch (error) {
       throw remoteFailure(error)
     }
+    if (remoteChanged) return { settings: valid, writable: true }
     if (JSON.stringify(settingsOf(this.config)) !== JSON.stringify(valid)) await this.apply({ ...this.config, ...patch } as Config)
     return { settings: settingsOf(this.config), writable: true }
   }
 
   /**
-   * Build the worker image from the bundled Dockerfile, on the user's request.
+   * Install Docker and gVisor on the remote VM over SSH (sudo there), on the user's request from the setup notice.
+   * @returns the fresh setup report.
+   */
+  @Remote
+  async prepareRemote(): Promise<SelfTestReport> {
+    try {
+      await this.manager.prepareRemote()
+    } catch (error) {
+      throw remoteFailure(error)
+    }
+    return this.setupStatus(true)
+  }
+
+  /**
+   * Build the worker image from the bundled Dockerfile (on the remote VM when one is set), on the user's request.
    * @returns the fresh setup report.
    */
   @Remote
@@ -561,7 +612,7 @@ export class CodeWorkspacesService extends TypertRemoteService {
     return (await this.manager.usage(sessionId).catch(() => undefined)) ?? null
   }
 
-  private readonly browsers = new IsolatedBrowsers()
+  private readonly browsers = new IsolatedBrowsers(() => this.manager.dockerBinary)
 
   private previewOn(sessionId: string): boolean {
     return this.manager.sessionOverrides(sessionId).preview ?? this.config.previewEnabled

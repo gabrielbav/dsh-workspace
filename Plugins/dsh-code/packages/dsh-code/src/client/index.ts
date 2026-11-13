@@ -51,6 +51,7 @@ interface CodeRemote {
   restart(sessionId: string): Promise<Result<CodeSessionView>>
   deleteWorkspace(sessionId: string): Promise<Result<void>>
   buildWorker(): Promise<Result<SelfTestReport>>
+  prepareRemote(): Promise<Result<SelfTestReport>>
   usage(sessionId: string): Promise<Result<WorkspaceUsage | null>>
   previewUrl(sessionId: string, port: number): Promise<Result<string>>
   settings(): Promise<Result<CodeSettingsView>>
@@ -333,6 +334,7 @@ function register(ctx: Context): void {
         hooks: { presetIds }, sessionId,
         setup: async (again: boolean) => outcome(await api().setupStatus(again)),
         buildWorker: async () => outcome(await api().buildWorker()),
+        prepareRemote: async () => outcome(await api().prepareRemote()),
       }
     },
   }, SetupNotice as ComponentType<never>))

@@ -29,6 +29,7 @@ export interface SetupInjected {
   readonly sessionId: string
   readonly setup: (refresh: boolean) => Promise<Outcome<SelfTestReport>>
   readonly buildWorker: () => Promise<Outcome<SelfTestReport>>
+  readonly prepareRemote: () => Promise<Outcome<SelfTestReport>>
 }
 
 /**
@@ -37,11 +38,12 @@ export interface SetupInjected {
  * @param props - injected setup calls, state and translator.
  * @returns the notice, or nothing.
  */
-export function SetupNotice({ usePresetIds, sessionId, setup, buildWorker, t }: InjectFace<SetupInjected> & PropsLocale<typeof NS>): ReactNode {
+export function SetupNotice({ usePresetIds, sessionId, setup, buildWorker, prepareRemote, t }: InjectFace<SetupInjected> & PropsLocale<typeof NS>): ReactNode {
   const codeMode = usePresetIds(ids => ids.has(sessionId))
   const [report, setReport] = useState<SelfTestReport | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [building, setBuilding] = useState(false)
+  const [preparing, setPreparing] = useState(false)
   useEffect(() => {
     if (!codeMode) return
     let live = true
@@ -62,9 +64,27 @@ export function SetupNotice({ usePresetIds, sessionId, setup, buildWorker, t }: 
         ))}
       </ul>
       {building && <div>{t('setup.building')}</div>}
+      {preparing && <div>{t('setup.preparing')}</div>}
       {error !== null && <div role="alert">{t('error.generic', { error })}</div>}
       <div style={row}>
-        <Button size="sm" variant="outline" disabled={building} onClick={() => { void setup(true).then(r => { if (r.ok) setReport(r.value) }) }}>{t('setup.retry')}</Button>
+        <Button size="sm" variant="outline" disabled={building || preparing} onClick={() => { void setup(true).then(r => { if (r.ok) setReport(r.value) }) }}>{t('setup.retry')}</Button>
+        {report.checks.some(c => !c.ok && c.action === 'prepare-remote') && (
+          <Button
+            size="sm"
+            disabled={preparing}
+            onClick={() => {
+              setPreparing(true)
+              setError(null)
+              void prepareRemote().then((r) => {
+                setPreparing(false)
+                if (r.ok) setReport(r.value)
+                else setError(r.message)
+              })
+            }}
+          >
+            {t('setup.prepareRemote')}
+          </Button>
+        )}
         {report.checks.some(c => !c.ok && c.action === 'build-worker') && (
           <Button
             size="sm"
@@ -251,6 +271,7 @@ function EnvironmentPanel({ load, status, side, t }: { readonly load: () => Prom
     `${t('env.lockdown')}: ${options.lockdown ? t('env.on') : t('env.off')}`,
     `${t('env.readOnlyWorkspace')}: ${options.readOnlyWorkspace ? t('env.on') : t('env.off')}`,
     `${t('env.dependencyCache')}: ${options.dependencyCache ? t('env.on') : t('env.off')}`,
+    `${t('env.dockerHost')}: ${options.remote === true ? t('env.dockerHost.remote') : t('env.dockerHost.local')}`,
     ...options.storage === undefined ? [] : [`${t('env.storage')}: ${options.storage === 'volume' ? t('env.storage.volume') : t('env.storage.bind')}`],
     ...options.readOnlyFolders.length === 0 ? [] : [t('env.foldersCount', { count: String(options.readOnlyFolders.length) })],
   ].join(' · ')
@@ -360,7 +381,7 @@ export interface SettingsInjected {
   readonly save: (settings: CodeSettings) => Promise<Outcome<CodeSettingsView>>
 }
 
-type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment', string>
+type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment' | 'remoteHost' | 'remotePort' | 'remoteUser' | 'remoteIdentityFile' | 'remoteHostKey', string>
   & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean; storage: CodeSettings['storage'] }
 
 function toDraft(settings: CodeSettings): Draft {
@@ -374,6 +395,7 @@ function toDraft(settings: CodeSettings): Draft {
     shmMb: String(settings.shmMb), readOnlyFolders: settings.readOnlyFolders.join('\n'), environment: settings.environment.join('\n'),
     readOnlyWorkspace: settings.readOnlyWorkspace, dependencyCache: settings.dependencyCache, lockdown: settings.lockdown,
     previewEnabled: settings.previewEnabled, isolatedBrowser: settings.isolatedBrowser, storage: settings.storage,
+    remoteHost: settings.remoteHost, remotePort: String(settings.remotePort), remoteUser: settings.remoteUser, remoteIdentityFile: settings.remoteIdentityFile, remoteHostKey: settings.remoteHostKey,
   }
 }
 
@@ -395,6 +417,7 @@ export function fromDraft(draft: Draft): CodeSettings {
     environment: draft.environment.split('\n').map(x => x.trim()).filter(x => x !== ''),
     readOnlyWorkspace: draft.readOnlyWorkspace, dependencyCache: draft.dependencyCache, lockdown: draft.lockdown,
     previewEnabled: draft.previewEnabled, isolatedBrowser: draft.isolatedBrowser, storage: draft.storage,
+    remoteHost: draft.remoteHost.trim(), remotePort: Number(draft.remotePort), remoteUser: draft.remoteUser.trim(), remoteIdentityFile: draft.remoteIdentityFile.trim(), remoteHostKey: draft.remoteHostKey.trim(),
   }
 }
 
@@ -567,6 +590,20 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
           <Switch label={t('settings.newBranch')} checked={draft.newBranch} onChange={(newBranch) => { setDraft({ ...draft, newBranch }) }} />
         </div>
         <div style={note}>{draft.newBranch ? t('settings.newBranchOn') : t('settings.newBranchOff')}</div>
+      </fieldset>
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
+        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.remote')}</legend>
+        <div style={note}>{t('settings.remoteHint')}</div>
+        {field('remoteHost')}
+        {draft.remoteHost.trim() !== '' && (
+          <>
+            {field('remotePort', 'number')}
+            {field('remoteUser')}
+            {field('remoteIdentityFile')}
+            {field('remoteHostKey')}
+            <div style={note}>{t('settings.remoteSaveHint')}</div>
+          </>
+        )}
       </fieldset>
       {field('workerImage')}
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>

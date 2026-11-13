@@ -12,7 +12,7 @@ export interface SelfTestCheck {
   /** What the user can do to fix a failing check. */
   readonly remedy?: string
   /** A fix Code can run itself, with the user's consent. */
-  readonly action?: 'build-worker'
+  readonly action?: 'build-worker' | 'prepare-remote'
   /** Passing, but something works only partly; shown with its remedy and never blocks Code. */
   readonly warning?: boolean
 }
@@ -106,6 +106,8 @@ export interface SessionEnvironment {
     readonly lockdown: boolean
     /** Where the checkout lives (or would, before the first message). */
     readonly storage?: 'bind' | 'volume'
+    /** The sandbox runs on a remote Docker host (the VM's address is not shown). */
+    readonly remote?: boolean
   }
   /** Provisioning steps of the latest start, oldest first. */
   readonly steps?: readonly ProvisionStep[]
@@ -161,6 +163,14 @@ export interface CodeSettings {
   readonly isolatedBrowser: boolean
   /** Where new checkouts live: automatic, a host folder, or a Docker volume on the Docker host. */
   readonly storage: 'auto' | 'bind' | 'volume'
+  /** Remote Docker host over SSH; empty runs sandboxes on this computer. Changing these reloads Code. */
+  readonly remoteHost: string
+  readonly remotePort: number
+  readonly remoteUser: string
+  /** Private key file on this computer. */
+  readonly remoteIdentityFile: string
+  /** The VM's SHA256 host key fingerprint. */
+  readonly remoteHostKey: string
 }
 
 /** Settings plus whether they can be saved to the profile. */

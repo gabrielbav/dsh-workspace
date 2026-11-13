@@ -30,8 +30,8 @@ class BrowserSession {
   error: string | undefined
   closed = false
 
-  constructor(argv: readonly string[], private readonly onClose: () => void) {
-    this.child = spawn('docker', [...argv], { stdio: ['pipe', 'pipe', 'pipe'] })
+  constructor(argv: readonly string[], private readonly onClose: () => void, binary = 'docker') {
+    this.child = spawn(binary, [...argv], { stdio: ['pipe', 'pipe', 'pipe'] })
     this.child.stderr.resume()
     createInterface({ input: this.child.stdout }).on('line', (line) => {
       let message: BrowserOutput
@@ -99,6 +99,9 @@ class BrowserSession {
 export class IsolatedBrowsers {
   private readonly sessions = new Map<string, BrowserSession>()
 
+  /** @param binary - the `docker` to run (WorkspaceManager.dockerBinary). */
+  constructor(private readonly binary: () => string = () => 'docker') {}
+
   /**
    * The browser of a session, started when missing.
    * @param sessionId - logical session id.
@@ -109,7 +112,7 @@ export class IsolatedBrowsers {
     const known = this.sessions.get(sessionId)
     if (known !== undefined && !known.closed) return Promise.resolve(known)
     return argv().then((resolved) => {
-      const session = new BrowserSession(resolved, () => { if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId) })
+      const session = new BrowserSession(resolved, () => { if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId) }, this.binary())
       this.sessions.set(sessionId, session)
       return session
     })

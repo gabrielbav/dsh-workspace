@@ -28,6 +28,7 @@ Status of [spec.md](spec.md) as implemented in this repository, and the open wor
 | Egress proxy recreated when its code changes (version label), checked at startup | `WorkspaceManager.ensureNetwork`, `proxyCodeHash` | real boot (old proxy replaced) |
 | `cordis.patch.yml` parses and names only exported entries | `tests/patch-file.test.ts` | unit test; caught an unquoted `: ` in the persona that made the preset fail to install |
 | Checkout storage: host folder or Docker volume (automatic by a write probe), bundle import and streamed push bundles, volume cleanup | `WorkspaceManager.probeStorage`, `importCheckout`, `commitAndPush`, `reconcile` | live tests on macOS (volume) |
+| Remote Docker host over SSH: pinned host key, generated ssh/docker wrappers, Prepare the VM, proxy code and policy in volumes, records per Docker host | `src/core/remote.ts`, `WorkspaceManager` (`remote`), Settings > Code | unit tests; live test over SSH to the Colima VM (6/6); Prepare the VM run on a VM that already had Docker and gVisor. Not yet run: Prepare the VM on a fresh Azure or AWS VM |
 | Offline detection and `[sandbox: ...]` messages | `WorkspaceManager.checkHealth`, `execArgv`, `fs-container.ts`, proxy 403 | live test |
 | Real exit codes (`setsid --wait`) | `src/host/subprocess-docker.ts` | live test |
 | First message held until provisioned; working directory moved into the checkout | `CodeWorkspacesService.hold` | real Web app run |

@@ -47,7 +47,7 @@ export class ContainerFileSystem extends FileSystem {
   private readonly helpers = new Map<string, FsHelperClient>()
   /** Replaceable for tests. */
   launch: HelperLauncher = record => new FsHelperClient(
-    ['docker', ...this.workspaces.execArgv(record, ['node', FS_HELPER_PATH, record.path], record.path, {}, false)],
+    [this.workspaces.dockerBinary, ...this.workspaces.execArgv(record, ['node', FS_HELPER_PATH, record.path], record.path, {}, false)],
     record.path,
   )
 
