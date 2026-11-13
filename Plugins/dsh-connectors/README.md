@@ -99,9 +99,9 @@ export function apply(ctx: { connectors: ConnectorsService; effect(run: () => ()
 }
 ```
 
-[`examples/connector-example`](examples/connector-example) is a complete, minimal connector package that follows the standard below. Linking it into a profile adds an "Example" row, and removing it takes the row away.
+[`examples/connector-example`](https://github.com/gabrielbav/dsh-connectors/tree/main/examples/connector-example) is a complete, minimal connector package that follows the standard below. Linking it into a profile adds an "Example" row, and removing it takes the row away.
 
-The full contract is in [`src/host/api.ts`](src/host/api.ts):
+The full contract is in [`src/host/api.ts`](https://github.com/gabrielbav/dsh-connectors/blob/main/src/host/api.ts):
 
 - `oauth` takes `client` for a pre-registered app, plus `scopes`, `identify` and `setupUrl`.
 - `token` takes form `fields` and a `verify` that checks the values and returns the credential to store.
@@ -123,18 +123,21 @@ The full contract is in [`src/host/api.ts`](src/host/api.ts):
 
 It also refuses a package with a browser half (`dsh.client`): a connector is a Host-side definition, so it has no reason to change the UI.
 
-The check runs on the registry manifest before anything downloads, and again at install time. The install then goes through the harness plugin manager with the exact version (`expected`, `saveExact`). Registered install gates (such as [Airlock](../dsh-plugin-airlock)) scan it first. A gate's review is shown on the page with an **Install anyway**, and a block stops the install.
+The check runs on the registry manifest before anything downloads, and again at install time. The install then goes through the harness plugin manager with the exact version (`expected`, `saveExact`). Registered install gates (such as [Airlock](https://github.com/gabrielbav/dsh-plugin-airlock)) scan it first. A gate's review is shown on the page with an **Install anyway**, and a block stops the install.
 
 The standard filters out packages that are not connectors. It is not a security boundary: a connector package is code that runs in the Host with your permissions, which is why the install gate matters.
 
 ## Install
 
+From the Plugins page: **Add plugin** → `@gabrielbav/dsh-connectors`. Or from the command line:
+
 ```sh
-make plugins P=connectors
-make start P=connectors        # or with other plugins: make start P="airlock connectors"
+dsh plugin --profile web add -w @gabrielbav/dsh-connectors
 ```
 
-Or into a profile: `dsh plugin --profile <name> add -w link:/abs/path/to/dsh-connectors`, then restart dsh. The plugin needs the `mcp-manager` and `credentials` services, which the web profile mounts. Package installs also need the plugin manager. It needs no fork hook.
+Restart dsh, then open **Settings → Connectors**. The plugin needs the `mcp-manager` and `credentials` services, which the Web and Desktop profiles mount. Package installs also need the plugin manager. It needs no harness fork.
+
+From a checkout, in the DSH workspace: `make plugins P=connectors`, then `make start P=connectors`.
 
 ## Limitations
 

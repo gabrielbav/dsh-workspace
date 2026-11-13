@@ -7,12 +7,24 @@
     "type": "git",
     "url": "git+https://github.com/gabrielbav/dsh-connectors.git"
   },
+  "homepage": "https://github.com/gabrielbav/dsh-connectors#readme",
+  "bugs": {
+    "url": "https://github.com/gabrielbav/dsh-connectors/issues"
+  },
   "keywords": [
     "deepseek-harness",
     "dsh-plugin",
     "mcp",
     "connectors",
-    "oauth"
+    "oauth",
+    "granola",
+    "linear",
+    "jira",
+    "confluence",
+    "trello",
+    "github",
+    "gitlab",
+    "azure-devops"
   ],
   "type": "module",
   "main": "lib/index.js",
@@ -53,7 +65,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsdown && node scripts/wrap-client.mjs",
+    "build": "node -e \"require('node:fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.json && tsdown && node scripts/wrap-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "prepublishOnly": "pnpm build && pnpm test"
