@@ -177,6 +177,8 @@ export interface CodeSettings {
 export interface CodeSettingsView {
   readonly settings: CodeSettings
   readonly writable: boolean
+  /** The save changed the Docker host, so Code reloaded with it. */
+  readonly reloaded?: boolean
 }
 
 /** One account the host's gh CLI is signed in with, for Settings > Code. */

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { OWNER_LABEL } from '../../src/core/container-spec.ts'
 import { DockerCli, processRunner } from '../../src/core/docker.ts'
-import { pinHostKey, validateRemote, writeRemoteFiles } from '../../src/core/remote.ts'
+import { pinHostKey, remoteShell, validateRemote, writeRemoteFiles } from '../../src/core/remote.ts'
 import { WorkspaceManager, type WorkspaceRecord } from '../../src/core/workspaces.ts'
 import { DEFAULT_ALLOW } from '../../src/egress/policy.ts'
 import { relayConnection } from '../../src/host/preview.ts'
@@ -110,6 +110,41 @@ describe.runIf(enabled)('workspaces on a remote Docker host over SSH', () => {
     await new Promise(r => setTimeout(r, 2500))
     expect(await manager.runInside(w, ['sh', '-c', 'curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://example.org/'])).toBe('403')
   }, 120_000)
+
+  it('runs 30 commands in parallel through one SSH connection', async () => {
+    const outputs = await Promise.all(Array.from({ length: 30 }, (_, i) => manager.runInside(w, ['sh', '-c', `echo ${i}`])))
+    expect(outputs).toEqual(Array.from({ length: 30 }, (_, i) => String(i)))
+  }, 120_000)
+
+  it('never reuses the connection to a VM chosen earlier after the host changes', async () => {
+    const other = join(root, 'switch')
+    writeRemoteFiles(other, host!, { ssh: which('ssh'), docker: which('docker') })
+    await pinHostKey(other, host!)
+    expect((await remoteShell(other, 'echo up')).stdout.trim()).toBe('up')
+    // Same folder, a host nothing answers on: the open connection to the first VM must not carry this command.
+    writeRemoteFiles(other, { ...host!, host: '192.0.2.1' }, { ssh: which('ssh'), docker: which('docker') })
+    expect((await remoteShell(other, 'echo up', undefined, 15_000)).code).not.toBe(0)
+  }, 60_000)
+
+  it('keeps local records loaded when the VM cannot be reached at startup', async () => {
+    const otherDir = join(root, 'down')
+    const down = { ...host!, port: 1 }
+    const unreachable = new WorkspaceManager({ ...manager.config, remote: { host: down, dir: otherDir, dockerBinary: writeRemoteFiles(otherDir, down, { ssh: which('ssh'), docker: which('docker') }) } })
+    await expect(unreachable.reconcile()).rejects.toThrow()
+    expect(unreachable.get('remote-a')).toBeDefined()
+  }, 60_000)
+
+  it('builds the worker image on the VM over SSH', async () => {
+    const saved = manager.config.image
+    manager.config.image = 'dsh-code-worker:ssh-build-test'
+    try {
+      await manager.buildWorker()
+      expect((await docker.tryExec(['image', 'inspect', 'dsh-code-worker:ssh-build-test'])).code).toBe(0)
+    } finally {
+      manager.config.image = saved
+      await docker.tryExec(['image', 'rm', 'dsh-code-worker:ssh-build-test'])
+    }
+  }, 900_000)
 
   it('commits on the VM and pushes from this computer, then deletes everything on the VM', async () => {
     await manager.runInside(w, ['sh', '-c', 'mkdir -p src && echo x > src/a.txt'])

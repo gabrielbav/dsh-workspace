@@ -15,6 +15,12 @@ export const OWNER_LABEL = 'io.github.gabrielbav.dsh-code'
 export const SESSION_LABEL = `${OWNER_LABEL}.session`
 /** Label carrying the workspace id. */
 export const WORKSPACE_LABEL = `${OWNER_LABEL}.workspace`
+/**
+ * Label with the random id of the data folder that created a container or volume. Startup cleanup removes only
+ * orphans carrying its own id, so two installations on one Docker host (two computers on one VM, or two data
+ * folders) never remove each other's workspaces.
+ */
+export const INSTALLATION_LABEL = `${OWNER_LABEL}.installation`
 /** Label on Docker volumes: `checkout` or `cache`. */
 export const VOLUME_KIND_LABEL = `${OWNER_LABEL}.volume`
 
@@ -39,6 +45,8 @@ export interface ContainerSpec {
   readonly name: string
   /** Value of the owner label; the manager's namespace marks which manager owns the container. */
   readonly owner?: string
+  /** Value of {@link INSTALLATION_LABEL}. */
+  readonly installation?: string
   readonly image: string
   readonly sessionId: string
   readonly workspaceId: string
@@ -142,6 +150,7 @@ export function createArgs(spec: ContainerSpec): string[] {
     '--label', `${OWNER_LABEL}=${spec.owner ?? '1'}`,
     '--label', `${SESSION_LABEL}=${spec.sessionId}`,
     '--label', `${WORKSPACE_LABEL}=${spec.workspaceId}`,
+    ...spec.installation === undefined ? [] : ['--label', `${INSTALLATION_LABEL}=${spec.installation}`],
     '--user', `${spec.uid}:${spec.gid}`,
     '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges',

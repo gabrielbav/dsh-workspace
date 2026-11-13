@@ -569,7 +569,7 @@ export class CodeWorkspacesService extends TypertRemoteService {
     } catch (error) {
       throw remoteFailure(error)
     }
-    if (remoteChanged) return { settings: valid, writable: true }
+    if (remoteChanged) return { settings: valid, writable: true, reloaded: true }
     if (JSON.stringify(settingsOf(this.config)) !== JSON.stringify(valid)) await this.apply({ ...this.config, ...patch } as Config)
     return { settings: settingsOf(this.config), writable: true }
   }

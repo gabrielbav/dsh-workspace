@@ -9,8 +9,9 @@
  * fingerprint; a server offering any other key is refused), uses one key file, never prompts, and reuses one
  * connection for all calls.
  */
-import { execFile } from 'node:child_process'
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
+import { execFile, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isIP } from 'node:net'
 
@@ -25,6 +26,37 @@ export interface RemoteHost {
   readonly identityFile: string
   /** The VM's host key fingerprint as `ssh-keygen -l` prints it, `SHA256:…`. */
   readonly hostKey: string
+}
+
+/**
+ * Short id of one SSH destination, for its connection socket.
+ * @param remote - settings.
+ * @returns 8 hex characters of a hash of login, host and port.
+ */
+export function connectionId(remote: Pick<RemoteHost, 'user' | 'host' | 'port'>): string {
+  return createHash('sha256').update(`${remote.user}@${remote.host}:${remote.port}`).digest('hex').slice(0, 8)
+}
+
+/** Unix socket paths are limited to 104 bytes on macOS, and ssh adds a 17-character suffix while creating one. */
+const SOCKET_PATH_MAX = 104 - 18
+
+/**
+ * Where the shared connection's socket lives: in Code's remote folder, or, when that path is too long for a Unix
+ * socket, in a private /tmp/dsh-code-<uid> folder that must be a real directory owned by this user with no access
+ * for others.
+ * @param dir - Code's remote folder.
+ * @param remote - settings.
+ * @returns the socket path.
+ */
+export function controlPath(dir: string, remote: Pick<RemoteHost, 'user' | 'host' | 'port'>): string {
+  const name = `cm-${connectionId(remote)}`
+  if (join(dir, name).length <= SOCKET_PATH_MAX) return join(dir, name)
+  const uid = process.getuid?.() ?? 0
+  const short = `/tmp/dsh-code-${uid}`
+  mkdirSync(short, { recursive: true, mode: 0o700 })
+  const info = lstatSync(short)
+  if (!info.isDirectory() || info.uid !== uid || (info.mode & 0o077) !== 0) throw new RemoteError('connection', `${short} must be a directory owned by this user with no access for others`)
+  return join(short, name)
 }
 
 /** Host alias in Code's SSH config. */
@@ -71,14 +103,15 @@ export function validateRemote(remote: RemoteHost): RemoteHost {
  * @returns the file content.
  */
 export function sshConfig(dir: string, remote: RemoteHost): string {
+  const q = (path: string): string => `"${path}"`
   return [
     `Host ${REMOTE_ALIAS}`,
     `  HostName ${remote.host}`,
     `  Port ${remote.port}`,
     `  User ${remote.user}`,
-    `  IdentityFile ${remote.identityFile}`,
+    `  IdentityFile ${q(remote.identityFile)}`,
     '  IdentitiesOnly yes',
-    `  UserKnownHostsFile ${join(dir, 'known_hosts')}`,
+    `  UserKnownHostsFile ${q(join(dir, 'known_hosts'))}`,
     '  GlobalKnownHostsFile /dev/null',
     '  StrictHostKeyChecking yes',
     '  CheckHostIP no',
@@ -90,8 +123,9 @@ export function sshConfig(dir: string, remote: RemoteHost): string {
     '  ForwardX11 no',
     '  ClearAllForwardings yes',
     '  ControlMaster auto',
-    // One host, so one shared connection; a fixed short name keeps the socket path under the 104-byte limit of macOS.
-    `  ControlPath ${join(dir, 'cm')}`,
+    // One shared connection per host: the name changes with the host, so a connection to a VM chosen earlier is never
+    // reused for a new one.
+    `  ControlPath ${q(controlPath(dir, remote))}`,
     '  ControlPersist 600',
     '  ServerAliveInterval 30',
     '  ServerAliveCountMax 4',
@@ -108,15 +142,18 @@ export function sshConfig(dir: string, remote: RemoteHost): string {
  * @returns the `docker` wrapper to run instead of `docker`.
  */
 export function writeRemoteFiles(dir: string, remote: RemoteHost, tools: { readonly ssh: string; readonly docker: string }): string {
+  if (/["'\\\n$`]/.test(dir) || /["'\\\n$`]/.test(tools.ssh) || /["'\\\n$`]/.test(tools.docker)) throw new RemoteError('connection', `the Code data folder and the ssh and docker paths must not contain quotes, backslashes, $ or backticks: ${dir}`)
+  // A connection still open to the host configured before must not carry the next commands.
+  if (existsSync(join(dir, 'ssh_config'))) spawnSync(tools.ssh, ['-F', join(dir, 'ssh_config'), '-O', 'exit', REMOTE_ALIAS], { timeout: 5000, stdio: 'ignore' })
   mkdirSync(join(dir, 'bin'), { recursive: true, mode: 0o700 })
   writeFileSync(join(dir, 'ssh_config'), sshConfig(dir, remote), { mode: 0o600 })
   // Start with no trusted key: until pinHostKey checks the fingerprint the user gave, SSH refuses the VM.
   writeFileSync(join(dir, 'known_hosts'), '', { mode: 0o600 })
   const ssh = join(dir, 'bin', 'ssh')
-  writeFileSync(ssh, `#!/bin/sh\nexec ${tools.ssh} -F ${join(dir, 'ssh_config')} "$@"\n`, { mode: 0o700 })
+  writeFileSync(ssh, `#!/bin/sh\nexec '${tools.ssh}' -F '${join(dir, 'ssh_config')}' "$@"\n`, { mode: 0o700 })
   chmodSync(ssh, 0o700)
   const docker = join(dir, 'docker')
-  writeFileSync(docker, `#!/bin/sh\nPATH=${join(dir, 'bin')}:$PATH\nDOCKER_HOST=ssh://${REMOTE_ALIAS}\nDOCKER_CONTEXT=\nexport PATH DOCKER_HOST DOCKER_CONTEXT\nexec ${tools.docker} "$@"\n`, { mode: 0o700 })
+  writeFileSync(docker, `#!/bin/sh\nPATH='${join(dir, 'bin')}':"$PATH"\nDOCKER_HOST=ssh://${REMOTE_ALIAS}\nDOCKER_CONTEXT=\nexport PATH DOCKER_HOST DOCKER_CONTEXT\nexec '${tools.docker}' "$@"\n`, { mode: 0o700 })
   chmodSync(docker, 0o700)
   return docker
 }
@@ -222,11 +259,10 @@ if ! command -v runsc >/dev/null 2>&1; then
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list >/dev/null
     sudo apt-get update -qq; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq runsc
   else
-    log "installing gVisor (release, sha512-checked)"
+    log "installing gVisor (release tarball, sha512-checked)"
     tmp=$(mktemp -d); ARCH=$(uname -m); URL=https://storage.googleapis.com/gvisor/releases/release/latest/$ARCH
-    (cd "$tmp" && curl -fsSLO "$URL/runsc" -O "$URL/runsc.sha512" -O "$URL/containerd-shim-runsc-v1" -O "$URL/containerd-shim-runsc-v1.sha512" \\
-      && sha512sum -c runsc.sha512 -c containerd-shim-runsc-v1.sha512 && chmod a+rx runsc containerd-shim-runsc-v1 \\
-      && sudo mv runsc containerd-shim-runsc-v1 /usr/local/bin/)
+    if command -v zstd >/dev/null 2>&1; then F=gvisor.tar.zstd; X=--zstd; else F=gvisor.tar.bz2; X=-j; fi
+    (cd "$tmp" && curl -fsSLO "$URL/$F" && curl -fsSLO "$URL/$F.sha512" && sha512sum -c "$F.sha512" && sudo tar "$X" -xf "$F" -C /usr/local/bin)
     rm -rf "$tmp"
   fi
 fi

@@ -7,11 +7,11 @@
  */
 import { chown, constants, cp, lchown, mkdir, open, readFile, rm, writeFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { execFile as execFileCb } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { DockerCli } from './docker.ts'
-import { CACHE_TARGET, createArgs, execArgs, OWNER_LABEL, REQUIRED_RUNTIME, SESSION_LABEL, VOLUME_KIND_LABEL, WORKSPACE_LABEL, type CheckoutStorage, type ResourceLimits } from './container-spec.ts'
+import { CACHE_TARGET, createArgs, execArgs, INSTALLATION_LABEL, OWNER_LABEL, REQUIRED_RUNTIME, SESSION_LABEL, VOLUME_KIND_LABEL, WORKSPACE_LABEL, type CheckoutStorage, type ResourceLimits } from './container-spec.ts'
 import { unsafeFolderReason } from './mounts.ts'
 import { Git, workingBranchName } from './git.ts'
 import type { RepositoryRef, SelfTestCheck, SelfTestReport, WorkspaceStatus, WorkspaceUsage } from '../types.ts'
@@ -204,9 +204,14 @@ export class WorkspaceManager {
     private readonly credentials: (account: string) => Promise<Readonly<Record<string, string>>> = async () => ({}),
   ) {
     if (config.uid === 0 || config.gid === 0) throw new WorkspaceError('unsafe-state', 'workspace uid/gid must not be 0')
+    this.installationId = installationIdOf(config.dataDir)
   }
 
-  private get namespace(): string { return this.config.namespace ?? DEFAULT_NAMESPACE }
+  /** Random id of this data folder (dataDir/installation-id), on every container and volume it creates. */
+  readonly installationId: string
+
+  /** On a remote host the default namespace is this installation's own, so installations sharing a VM share nothing. */
+  private get namespace(): string { return this.config.namespace ?? (this.config.remote === undefined ? DEFAULT_NAMESPACE : `dsh-code-${this.installationId.slice(0, 8)}`) }
   private get owner(): string { return this.namespace === DEFAULT_NAMESPACE ? '1' : this.namespace }
   /** Internal network: workers and the proxy only, no route out. */
   get internalNetwork(): string { return `${this.namespace}-internal` }
@@ -327,12 +332,20 @@ export class WorkspaceManager {
     return log
   }
 
+  /** On a remote host, pin the host key when it is not pinned yet (SSH refuses the VM until then). */
+  private async ensurePinned(): Promise<void> {
+    const remote = this.config.remote
+    if (remote === undefined) return
+    const pinned = await readFile(join(remote.dir, 'known_hosts'), 'utf8').catch(() => '')
+    if (pinned.trim() === '') await pinHostKey(remote.dir, remote.host)
+  }
+
   /** Result of the last storage probe, shared by provisioning and the self test. */
   private storageChoice: Promise<CheckoutStorage | undefined> | undefined
 
   /** Labels on every volume this manager owns. */
   private volumeLabels(kind: 'checkout' | 'cache' | 'probe' | 'proxy', workspaceId?: string): string[] {
-    return [`${OWNER_LABEL}=${this.owner}`, `${VOLUME_KIND_LABEL}=${kind}`, ...workspaceId === undefined ? [] : [`${WORKSPACE_LABEL}=${workspaceId}`]]
+    return [`${OWNER_LABEL}=${this.owner}`, `${INSTALLATION_LABEL}=${this.installationId}`, `${VOLUME_KIND_LABEL}=${kind}`, ...workspaceId === undefined ? [] : [`${WORKSPACE_LABEL}=${workspaceId}`]]
   }
 
   /** A short-lived trusted container on one volume: gVisor, no network, no capabilities unless named. */
@@ -431,10 +444,8 @@ export class WorkspaceManager {
   /** Load records from disk and reconcile them against Docker state. */
   async reconcile(): Promise<{ orphansRemoved: string[]; offline: string[] }> {
     await mkdir(this.recordsDir, { recursive: true })
-    // SSH refuses the VM until its host key is checked against the fingerprint in Settings.
-    if (this.config.remote !== undefined) await pinHostKey(this.config.remote.dir, this.config.remote.host)
-    // A running proxy reloads this file, so a policy saved while Harness was down applies now.
-    await this.updatePolicy(this.config.policy)
+    // Everything local first: a Docker host that is down (a stopped VM, no network) must not keep records,
+    // overrides, variables or grants from loading.
     await mkdir(join(this.config.dataDir, 'overrides'), { recursive: true, mode: 0o700 })
     for (const file of await readdir(join(this.config.dataDir, 'overrides'))) {
       if (!file.endsWith('.json')) continue
@@ -470,24 +481,40 @@ export class WorkspaceManager {
       const record = JSON.parse(await readFile(join(this.recordsDir, file), 'utf8')) as WorkspaceRecord
       if (record.status !== 'deleted') this.records.set(record.sessionId, record)
     }
+    try {
+      return await this.reconcileDocker()
+    } catch (error) {
+      // The Docker host is unreachable: its workspaces are offline and restart with their next message once it is back.
+      for (const record of this.records.values()) {
+        if (!this.onOtherBackend(record) && record.status === 'ready') await this.setStatus(record, 'offline')
+      }
+      throw error
+    }
+  }
+
+  /** The Docker half of {@link reconcile}: proxy, orphans and container state on this manager's Docker host. */
+  private async reconcileDocker(): Promise<{ orphansRemoved: string[]; offline: string[] }> {
+    await this.ensurePinned()
+    // A running proxy reloads this file, so a policy saved while Harness was down applies now.
+    await this.updatePolicy(this.config.policy)
     // Bring an existing proxy up to the shipped code now, not at the next new workspace.
     if (await this.docker.inspect(this.proxyContainer) !== undefined) {
       await this.ensureNetwork().catch((error: unknown) => { console.warn(`dsh-code: egress proxy refresh failed: ${String(error)}`) })
     }
     const orphansRemoved: string[] = []
-    for (const id of await this.docker.containersWithLabel(`${OWNER_LABEL}=${this.owner}`)) {
+    for (const id of await this.docker.containersWithLabel(`${INSTALLATION_LABEL}=${this.installationId}`)) {
       if (id === this.proxyContainer) continue
       const info = await this.docker.inspect(id)
       const sessionId = info?.labels[SESSION_LABEL]
-      if (sessionId === undefined) continue
+      if (sessionId === undefined || info?.labels[OWNER_LABEL] !== this.owner) continue
       if (!this.records.has(sessionId)) {
         await this.docker.removeContainer(id)
         orphansRemoved.push(id)
       }
     }
     const volumes = new Set([...this.records.values()].flatMap(r => r.volume === undefined ? [] : [r.volume]))
-    for (const volume of await this.docker.volumesWithLabel(`${OWNER_LABEL}=${this.owner}`)) {
-      if (volume.labels[VOLUME_KIND_LABEL] === 'checkout' && !volumes.has(volume.name)) {
+    for (const volume of await this.docker.volumesWithLabel(`${INSTALLATION_LABEL}=${this.installationId}`)) {
+      if (volume.labels[OWNER_LABEL] === this.owner && volume.labels[VOLUME_KIND_LABEL] === 'checkout' && !volumes.has(volume.name)) {
         await this.docker.removeVolume(volume.name)
         orphansRemoved.push(volume.name)
       }
@@ -918,6 +945,7 @@ export class WorkspaceManager {
     const live = [...this.records.values()].filter(r => r.status !== 'deleted' && r.sessionId !== sessionId).length
     if (live >= this.config.maxWorkspaces) throw new WorkspaceError('limit-reached', `at most ${this.config.maxWorkspaces} Code workspaces may run on this host`)
     onProgress('checking-runtime')
+    await this.ensurePinned()
     const runtimes = await this.docker.runtimes()
     if (!runtimes.includes(REQUIRED_RUNTIME)) throw new WorkspaceError('gvisor-unavailable', 'Docker has no runsc runtime; Code execution is blocked')
     onProgress('egress-proxy')
@@ -984,7 +1012,7 @@ export class WorkspaceManager {
         ...options.cacheDir === undefined ? {} : { cacheDir: options.cacheDir },
         ...options.cacheVolume === undefined ? {} : { cacheVolume: options.cacheVolume },
         ...record.storage === 'volume' ? { storage: 'volume' as const, volume: record.volume } : {},
-        name: record.containerName, owner: this.owner, image: record.image, sessionId, workspaceId,
+        name: record.containerName, owner: this.owner, installation: this.installationId, image: record.image, sessionId, workspaceId,
         workspacePath: record.path, network: this.internalNetwork,
         proxyUrl: this.config.policy.mode === 'none' ? undefined : `http://${this.proxyContainer}:${PROXY_PORT}`,
         uid: this.config.uid, gid: this.config.gid, limits: this.config.limits,
@@ -1211,6 +1239,25 @@ export function parseStats(line: string, limits: ResourceLimits, diskBytes: numb
     pidsLimit: limits.pids,
     diskBytes,
   }
+}
+
+/**
+ * Read this data folder's installation id, creating it on first use.
+ * @param dataDir - the Code data folder.
+ * @returns a random UUID kept in dataDir/installation-id.
+ */
+export function installationIdOf(dataDir: string): string {
+  const file = join(dataDir, 'installation-id')
+  try {
+    const known = readFileSync(file, 'utf8').trim()
+    if (/^[0-9a-f-]{36}$/.test(known)) return known
+  } catch {
+    // First use of this data folder.
+  }
+  const id = randomUUID()
+  mkdirSync(dataDir, { recursive: true })
+  writeFileSync(file, `${id}\n`, { mode: 0o600 })
+  return id
 }
 
 /** Largest push bundle accepted from a workspace. */

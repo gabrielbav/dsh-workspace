@@ -24,7 +24,7 @@ Code can run its sandboxes on a Linux VM you own instead of your computer. You g
 - SSH reachable from your computer only (a firewall rule for your IP address).
 - The VM's host key fingerprint, read out-of-band (from the cloud provider, not over the network you are about to trust). The steps below show how.
 
-Commands below use the Azure CLI (`az`) and the AWS CLI (`aws`), already logged in. The same can be done in each provider's web console.
+Commands below use the Azure CLI (`az`) and the AWS CLI (`aws`), already logged in, and follow each CLI's reference; they have not been run end to end yet, so check each step's output. The same can be done in each provider's web console.
 
 ```sh
 MYIP=$(curl -s https://checkip.amazonaws.com)   # your public IP address
@@ -82,7 +82,7 @@ Delete everything afterwards: `aws ec2 terminate-instances --instance-ids "$ID"`
 
 1. Save Settings > Code. Code reloads with the remote host.
 2. Choose **Code mode** in a session. The setup notice above the composer checks the connection first: it pins the host key (a wrong fingerprint is refused, and the notice lists what the server offered) and logs in once.
-3. On a fresh VM it reports that Docker is missing. **Prepare the VM** logs in over SSH and, with `sudo`, installs Docker Engine and gVisor from the distribution's and gVisor's package repositories (on Amazon Linux and Fedora: gVisor's release, sha512-checked), registers `runsc` with Docker and adds your login to the `docker` group. It leaves anything already installed as it is.
+3. On a fresh VM it reports that Docker is missing. **Prepare the VM** logs in over SSH and, with `sudo`, installs Docker Engine and gVisor from the distribution's and gVisor's package repositories (on Amazon Linux and Fedora: gVisor's sha512-checked release tarball, a path that has not run yet), registers `runsc` with Docker and adds your login to the `docker` group. It leaves anything already installed as it is.
 4. **Build worker image** builds `dsh-code-worker` on the VM (the build context is sent over the same SSH connection; a few minutes).
 5. Choose a repository with **+ → Repository** and send a message.
 

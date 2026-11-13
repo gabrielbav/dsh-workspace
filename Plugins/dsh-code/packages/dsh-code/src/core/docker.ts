@@ -185,8 +185,12 @@ export class DockerCli {
    * @returns labels and whether it is running, or undefined when absent.
    */
   async inspect(id: string): Promise<{ labels: Record<string, string>; running: boolean; runtime: string } | undefined> {
-    const result = await this.run(['inspect', '--type', 'container', '--format', '{{json .Config.Labels}}|{{.State.Running}}|{{.HostConfig.Runtime}}', id])
-    if (result.code !== 0) return undefined
+    const args = ['inspect', '--type', 'container', '--format', '{{json .Config.Labels}}|{{.State.Running}}|{{.HostConfig.Runtime}}', id]
+    const result = await this.run(args)
+    // Only Docker's own answer means the container is gone; a failed connection (a remote VM out of reach, a daemon
+    // restarting) must not look like it, or healthy workspaces would be recreated.
+    if (result.code !== 0 && /no such (container|object)/i.test(result.stderr)) return undefined
+    if (result.code !== 0) throw new DockerError(args, result)
     const [labels, running, runtime] = result.stdout.trim().split('|')
     return { labels: JSON.parse(labels ?? '{}') as Record<string, string>, running: running === 'true', runtime: runtime ?? '' }
   }

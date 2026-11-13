@@ -482,7 +482,7 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
         setMessage(null)
         void save(fromDraft(draft)).then((r) => {
           setBusy(false)
-          if (r.ok) { setDraft(toDraft(r.value.settings)); setWritable(r.value.writable); setMessage(t('settings.saved')) }
+          if (r.ok) { setDraft(toDraft(r.value.settings)); setWritable(r.value.writable); setMessage(t(r.value.reloaded === true ? 'settings.savedReloaded' : 'settings.saved')) }
           else setMessage(t('error.generic', { error: r.message }))
         })
       }}

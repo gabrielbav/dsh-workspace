@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fingerprints, pinHostKey, RemoteError, sshConfig, validateRemote, writeRemoteFiles, type RemoteHost } from '../src/core/remote.ts'
+import { connectionId, fingerprints, pinHostKey, RemoteError, sshConfig, validateRemote, writeRemoteFiles, type RemoteHost } from '../src/core/remote.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-code-remote-'))
 afterAll(() => { rmSync(root, { recursive: true, force: true }) })
@@ -48,17 +48,27 @@ describe('remote Docker host settings', () => {
 
   it('writes an SSH config that pins the host key, never prompts, forwards nothing and reuses one connection', () => {
     const config = sshConfig('/data/remote', good)
-    for (const line of ['HostName vm.example.org', 'User azureuser', 'IdentityFile /Users/me/.ssh/id_ed25519', 'IdentitiesOnly yes', 'StrictHostKeyChecking yes',
-      'UserKnownHostsFile /data/remote/known_hosts', 'GlobalKnownHostsFile /dev/null', 'BatchMode yes', 'ForwardAgent no', 'ClearAllForwardings yes', 'ControlPath /data/remote/cm']) {
+    for (const line of ['HostName vm.example.org', 'User azureuser', 'IdentityFile "/Users/me/.ssh/id_ed25519"', 'IdentitiesOnly yes', 'StrictHostKeyChecking yes',
+      'UserKnownHostsFile "/data/remote/known_hosts"', 'GlobalKnownHostsFile /dev/null', 'BatchMode yes', 'ForwardAgent no', 'ClearAllForwardings yes',
+      `ControlPath "/data/remote/cm-${connectionId(good)}"`]) {
       expect(config).toContain(line)
     }
+    // Another VM gets another shared connection, so one opened to the previous VM is never reused.
+    expect(connectionId({ ...good, host: 'other.example.org' })).not.toBe(connectionId(good))
+    expect(connectionId(good)).toMatch(/^[0-9a-f]{8}$/)
+    // A data folder too deep for a Unix socket path puts the socket in a private /tmp folder instead.
+    expect(sshConfig(`/${'x'.repeat(120)}`, good)).toContain(`ControlPath "/tmp/dsh-code-${process.getuid?.() ?? 0}/cm-${connectionId(good)}"`)
   })
 
   it('generates owner-only wrappers that use only Code\'s SSH config', () => {
-    const dir = join(root, 'files')
+    // A data folder with spaces works: every path in the wrappers and the config is quoted.
+    const dir = join(root, 'with space', 'files')
     const docker = writeRemoteFiles(dir, good, { ssh: '/usr/bin/ssh', docker: '/usr/local/bin/docker' })
     expect(readFileSync(docker, 'utf8')).toContain('DOCKER_HOST=ssh://dsh-code-remote')
-    expect(readFileSync(join(dir, 'bin', 'ssh'), 'utf8')).toContain(`exec /usr/bin/ssh -F ${join(dir, 'ssh_config')} "$@"`)
+    expect(readFileSync(docker, 'utf8')).toContain(`PATH='${join(dir, 'bin')}':"$PATH"`)
+    expect(readFileSync(join(dir, 'bin', 'ssh'), 'utf8')).toContain(`exec '/usr/bin/ssh' -F '${join(dir, 'ssh_config')}' "$@"`)
+    expect(execFileSync('sh', ['-n', docker]).toString()).toBe('')
+    expect(() => writeRemoteFiles(join(root, "it's"), good, { ssh: '/usr/bin/ssh', docker: 'docker' })).toThrow(RemoteError)
     for (const file of [docker, join(dir, 'bin', 'ssh'), join(dir, 'ssh_config'), join(dir, 'known_hosts')]) expect(statSync(file).mode & 0o077, file).toBe(0)
   })
 

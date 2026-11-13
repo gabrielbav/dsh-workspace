@@ -211,6 +211,7 @@ export const en = {
   'settings.previewPorts': 'Preview ports (optional, comma separated; empty allows any port the app listens on)',
   'settings.save': 'Save',
   'settings.saved': 'Saved. Network changes apply now; /tmp size and image apply when a workspace restarts.',
+  'settings.savedReloaded': 'Saved. Code reloaded with the new Docker host; the setup notice of a Code session shows whether it is reachable.',
   'settings.notWritable': 'This profile cannot be edited from here; changes last until Harness restarts.',
 } as const
 
@@ -425,6 +426,7 @@ export const zh: Record<CodeKey, string> = {
   'settings.previewPorts': '预览端口（可选，逗号分隔；留空则允许应用监听的任何端口）',
   'settings.save': '保存',
   'settings.saved': '已保存。网络更改立即生效；/tmp 大小和镜像在工作区重启时生效。',
+  'settings.savedReloaded': '已保存。Code 已使用新的 Docker 主机重新加载；Code 会话的设置提示会显示它是否可达。',
   'settings.notWritable': '无法在此编辑该配置文件；更改在 Harness 重启前有效。',
 }
 

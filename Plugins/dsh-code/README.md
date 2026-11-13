@@ -59,7 +59,7 @@ Beside Chat and Trajectory: the GitHub account, repository, branches and commit,
 
 ### The Preview tab
 
-The web app the agent starts, found by the port it listens on. It is reached through `docker exec`, so no host port is published and no route into the container exists; it works the same on Linux, macOS, Windows and a remote VM. Two modes, both switchable in Settings and per session:
+The web app the agent starts, found by the port it listens on. It is reached through `docker exec`, so no host port is published and no route into the container exists; it works the same on Linux, macOS and a remote VM. Two modes, both switchable in Settings and per session:
 
 - **Frame:** a sandboxed frame in your browser, with an opaque origin, no cookies forwarded and no logins.
 - **Isolated browser:** Chromium runs inside the sandbox and only screen frames leave it, so page code never runs on your computer and apps with logins work.
@@ -88,7 +88,8 @@ Unit tests (127) cover the policy, proxy, settings, container spec, remote setti
 - a `pre-push` hook and a `core.fsmonitor` command planted in the checkout do not run on the host when it pushes;
 - real exit codes, whole process groups stopped, an offline container reported as such, and cleanup after restart (containers, checkouts, mirrors, volumes);
 - on macOS, the non-root sandbox user writes, commits and pushes from a volume checkout;
-- over SSH to a remote Docker host: the host key pin (a wrong fingerprint is refused), provisioning on the VM, the file helper and Preview relay through SSH, egress filtering and a session grant on the VM, and a push from this computer.
+- over SSH to a remote Docker host (run against a local VM's SSH server, not yet against Azure or AWS): the host key pin (a wrong fingerprint is refused), provisioning on the VM, the file helper and Preview relay through SSH, 30 parallel commands over one connection, a host change never reusing the old connection, an unreachable VM at startup keeping local records, a worker image build, egress filtering and a session grant on the VM, and a push from this computer;
+- cleanup removes only its own orphans: a checkout volume of another installation on the same Docker host is left alone.
 
 ```sh
 pnpm test                 # unit tests
@@ -176,7 +177,7 @@ The `code` preset leaves out tools that would act from the host on the agent's b
 
 - **Previews** need `dsh web` (the desktop app has no web server) and proxy plain HTTP only: no WebSocket, so no dev-server hot reload. Apps work best with relative asset paths.
 - **Volume checkouts** (macOS, remote VMs) are not visible in Finder or in the Harness file tree, and deleting the Docker VM loses work that was not pushed.
-- **On a remote VM**, extra read-only folders are skipped (they are on your computer). **Prepare the VM** has been run against a VM that already had Docker and gVisor, not yet against a fresh Azure or AWS VM.
+- **On a remote VM**, extra read-only folders are skipped (they are on your computer). **Prepare the VM** has been run against a VM that already had Docker and gVisor, not yet against a fresh Azure or AWS VM; its Amazon Linux and Fedora path (gVisor's release tarball) has not run at all.
 - **Windows (WSL2)** is untested.
 - **Host-configured MCP servers** run on the host as before; repository-defined MCP servers are not started for Code sessions.
 - **Choices before the first message** (repository, branch, account) live in memory until the workspace starts.

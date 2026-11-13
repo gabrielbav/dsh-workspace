@@ -9,7 +9,7 @@ import { request } from 'node:http'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { OWNER_LABEL, VOLUME_KIND_LABEL } from '../../src/core/container-spec.ts'
+import { INSTALLATION_LABEL, OWNER_LABEL, VOLUME_KIND_LABEL } from '../../src/core/container-spec.ts'
 import { DockerCli } from '../../src/core/docker.ts'
 import { WorkspaceManager, type WorkspaceRecord } from '../../src/core/workspaces.ts'
 import { DEFAULT_ALLOW, type EgressPolicy } from '../../src/egress/policy.ts'
@@ -251,11 +251,19 @@ describe.runIf(enabled)('workspaces on Docker + gVisor', () => {
 
   it('reconciles after a restart and cleans up everything it owns', async () => {
     // A checkout volume no record owns (a crash between creating it and saving the record) is removed.
-    const stray = `${manager.internalNetwork.replace(/-internal$/, '')}-ws-stray`
-    await docker.exec(['volume', 'create', '--label', `${OWNER_LABEL}=${manager.internalNetwork.replace(/-internal$/, '')}`, '--label', `${VOLUME_KIND_LABEL}=checkout`, stray])
+    // A checkout volume of another installation on the same Docker host (another data folder, another computer on
+    // the same VM) is never touched.
+    const ns = manager.internalNetwork.replace(/-internal$/, '')
+    const stray = `${ns}-ws-stray`
+    const foreign = `${ns}-ws-foreign`
+    await docker.exec(['volume', 'create', '--label', `${OWNER_LABEL}=${ns}`, '--label', `${INSTALLATION_LABEL}=${manager.installationId}`, '--label', `${VOLUME_KIND_LABEL}=checkout`, stray])
+    await docker.exec(['volume', 'create', '--label', `${OWNER_LABEL}=${ns}`, '--label', `${INSTALLATION_LABEL}=00000000-0000-4000-8000-000000000000`, '--label', `${VOLUME_KIND_LABEL}=checkout`, foreign])
     const fresh = new WorkspaceManager(manager.config)
     const report = await fresh.reconcile()
     expect(report.orphansRemoved).toContain(stray)
+    expect(report.orphansRemoved).not.toContain(foreign)
+    expect((await docker.tryExec(['volume', 'inspect', foreign])).code).toBe(0)
+    await docker.removeVolume(foreign)
     expect(report.offline).toEqual([])
     expect(fresh.get('session-b')?.status).toBe('ready')
     await fresh.delete('session-b')
