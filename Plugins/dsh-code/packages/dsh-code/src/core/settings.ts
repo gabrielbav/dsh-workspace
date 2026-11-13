@@ -42,6 +42,7 @@ function ports(field: keyof CodeSettings, value: unknown): number[] {
  */
 export function validateSettings(input: CodeSettings): CodeSettings {
   if (input.network !== 'allowlist' && input.network !== 'none' && input.network !== 'open') throw new SettingsError('network', 'must be allowlist, none or open')
+  if (input.storage !== 'auto' && input.storage !== 'bind' && input.storage !== 'volume') throw new SettingsError('storage', 'must be auto, bind or volume')
   if (!Array.isArray(input.allow) || input.allow.length > 512) throw new SettingsError('allow', 'must be a list of at most 512 host names')
   const allow = [...new Set(input.allow.map((pattern) => {
     const wildcard = typeof pattern === 'string' && pattern.startsWith('*.')
@@ -100,11 +101,12 @@ export function validateSettings(input: CodeSettings): CodeSettings {
     lockdown: input.lockdown,
     previewEnabled: input.previewEnabled,
     isolatedBrowser: input.isolatedBrowser,
+    storage: input.storage,
   }
 }
 
 /** Config fields Settings > Code edits; all apply without restarting Harness. */
-export const SETTINGS_FIELDS = ['network', 'allow', 'privateAllow', 'ports', 'cpus', 'memoryMb', 'pids', 'tmpMb', 'maxWorkspaces', 'workerImage', 'previewPorts', 'disabledAccounts', 'newBranch', 'shmMb', 'readOnlyWorkspace', 'dependencyCache', 'readOnlyFolders', 'environment', 'lockdown', 'previewEnabled', 'isolatedBrowser'] as const satisfies ReadonlyArray<keyof CodeSettings>
+export const SETTINGS_FIELDS = ['network', 'allow', 'privateAllow', 'ports', 'cpus', 'memoryMb', 'pids', 'tmpMb', 'maxWorkspaces', 'workerImage', 'previewPorts', 'disabledAccounts', 'newBranch', 'shmMb', 'readOnlyWorkspace', 'dependencyCache', 'readOnlyFolders', 'environment', 'lockdown', 'previewEnabled', 'isolatedBrowser', 'storage'] as const satisfies ReadonlyArray<keyof CodeSettings>
 
 /**
  * Whether two configs differ only in live-applicable settings.

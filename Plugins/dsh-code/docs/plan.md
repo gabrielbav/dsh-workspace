@@ -27,6 +27,7 @@ Status of [spec.md](spec.md) as implemented in this repository, and the open wor
 | Per-session host approval: `request_network_access`, Harness approval card, grants keyed by container address, Approved hosts in the Environment tab | `src/host/network-tool.ts`, `policyForClient`, `WorkspaceManager.grantNetwork` | unit tests; live test (granted to one session, refused to the other, revoked) |
 | Egress proxy recreated when its code changes (version label), checked at startup | `WorkspaceManager.ensureNetwork`, `proxyCodeHash` | real boot (old proxy replaced) |
 | `cordis.patch.yml` parses and names only exported entries | `tests/patch-file.test.ts` | unit test; caught an unquoted `: ` in the persona that made the preset fail to install |
+| Checkout storage: host folder or Docker volume (automatic by a write probe), bundle import and streamed push bundles, volume cleanup | `WorkspaceManager.probeStorage`, `importCheckout`, `commitAndPush`, `reconcile` | live tests on macOS (volume) |
 | Offline detection and `[sandbox: ...]` messages | `WorkspaceManager.checkHealth`, `execArgv`, `fs-container.ts`, proxy 403 | live test |
 | Real exit codes (`setsid --wait`) | `src/host/subprocess-docker.ts` | live test |
 | First message held until provisioned; working directory moved into the checkout | `CodeWorkspacesService.hold` | real Web app run |
@@ -74,7 +75,8 @@ Ordered by priority. Each item lists the goal, the approach, and how to verify i
 ### 4. macOS and Windows
 - **Goal:** spec §8.2.
 - **Approach:** Colima (macOS) and WSL2 (Windows) with `runsc` inside the VM; the checkout must have the same absolute path in the VM and in the container.
-- **Found on macOS (Colima 0.10, vz + virtiofs, runsc release-20261109.0):** the VM cannot read `~/Documents` (fixed: the proxy code is copied into `dataDir`); `/var/folders` temp dirs are not shared, so run `test:docker` with `TMPDIR` under `$HOME`; inside gVisor the shared checkout reads as owned by `0:0` while `runc` shows the host uid, so the sandbox user cannot write (`--directfs=false` and `--overlay2=none` do not change it). Next: try Colima `mountType: sshfs`.
+- **Found on macOS (Colima 0.10, vz + virtiofs, runsc release-20261109.0):** the VM cannot read `~/Documents` (fixed: the proxy code is copied into `dataDir`); `/var/folders` temp dirs are not shared, so run `test:docker` with `TMPDIR` under `$HOME`; inside gVisor the shared checkout reads as owned by `0:0`, so the sandbox user cannot write (`--directfs=false` and `--overlay2=none` do not change it).
+- **Fixed with Docker volumes (2026-11-13):** a checkout in a Docker volume, owned by the sandbox user, is writable from gVisor as uid 1000, as long as the container has no create-time `--workdir` on that mount (with one, gVisor shows the mount as owned by root; every exec passes `-w` instead). Running as uid 0 with no capabilities was tried and dropped: the same shared folder showed two owners at once (`stat .git` gave the Mac uid, a listing gave root), so writes failed intermittently. The full live suite passes on macOS as uid 1000 (three runs).
 
 ### 5. Remote Control (spec §11, Phase 4)
 - **Goal:** open and control a locally running Code session from an online Harness, without moving execution.

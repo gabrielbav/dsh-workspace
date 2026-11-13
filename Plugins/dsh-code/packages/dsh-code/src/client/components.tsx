@@ -251,6 +251,7 @@ function EnvironmentPanel({ load, status, side, t }: { readonly load: () => Prom
     `${t('env.lockdown')}: ${options.lockdown ? t('env.on') : t('env.off')}`,
     `${t('env.readOnlyWorkspace')}: ${options.readOnlyWorkspace ? t('env.on') : t('env.off')}`,
     `${t('env.dependencyCache')}: ${options.dependencyCache ? t('env.on') : t('env.off')}`,
+    ...options.storage === undefined ? [] : [`${t('env.storage')}: ${options.storage === 'volume' ? t('env.storage.volume') : t('env.storage.bind')}`],
     ...options.readOnlyFolders.length === 0 ? [] : [t('env.foldersCount', { count: String(options.readOnlyFolders.length) })],
   ].join(' · ')
   const rows: [string, string | undefined][] = env.mode === 'host'
@@ -360,7 +361,7 @@ export interface SettingsInjected {
 }
 
 type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment', string>
-  & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean }
+  & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean; storage: CodeSettings['storage'] }
 
 function toDraft(settings: CodeSettings): Draft {
   return {
@@ -372,7 +373,7 @@ function toDraft(settings: CodeSettings): Draft {
     disabledAccounts: settings.disabledAccounts, newBranch: settings.newBranch,
     shmMb: String(settings.shmMb), readOnlyFolders: settings.readOnlyFolders.join('\n'), environment: settings.environment.join('\n'),
     readOnlyWorkspace: settings.readOnlyWorkspace, dependencyCache: settings.dependencyCache, lockdown: settings.lockdown,
-    previewEnabled: settings.previewEnabled, isolatedBrowser: settings.isolatedBrowser,
+    previewEnabled: settings.previewEnabled, isolatedBrowser: settings.isolatedBrowser, storage: settings.storage,
   }
 }
 
@@ -393,7 +394,7 @@ export function fromDraft(draft: Draft): CodeSettings {
     shmMb: Number(draft.shmMb), readOnlyFolders: draft.readOnlyFolders.split('\n').map(x => x.trim()).filter(x => x !== ''),
     environment: draft.environment.split('\n').map(x => x.trim()).filter(x => x !== ''),
     readOnlyWorkspace: draft.readOnlyWorkspace, dependencyCache: draft.dependencyCache, lockdown: draft.lockdown,
-    previewEnabled: draft.previewEnabled, isolatedBrowser: draft.isolatedBrowser,
+    previewEnabled: draft.previewEnabled, isolatedBrowser: draft.isolatedBrowser, storage: draft.storage,
   }
 }
 
@@ -428,7 +429,7 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
     return () => { live = false }
   }, [load, t])
   if (draft === null) return <div style={note}>{message ?? t('picker.loading')}</div>
-  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
+  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
     <label style={{ display: 'grid', gap: 4 }}>
       <span style={note}>{t(`settings.${key}`)}</span>
       <Input aria-label={t(`settings.${key}`)} type={type} value={draft[key]} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
@@ -493,6 +494,21 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
         {field('tmpMb', 'number')}
         {field('maxWorkspaces', 'number')}
         {field('shmMb', 'number')}
+      </fieldset>
+      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
+        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.storage')}</legend>
+        <SegmentedControl<CodeSettings['storage']>
+          id="dsh-code-storage"
+          label={t('settings.storage')}
+          value={draft.storage}
+          onChange={(storage) => { setDraft({ ...draft, storage }) }}
+          options={[
+            { value: 'auto', label: t('settings.storage.auto') },
+            { value: 'bind', label: t('settings.storage.bind') },
+            { value: 'volume', label: t('settings.storage.volume') },
+          ]}
+        />
+        <div style={note}>{t('settings.storageHint')}</div>
       </fieldset>
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 10 }} disabled={draft.lockdown}>
         <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.workspace')}</legend>

@@ -73,6 +73,7 @@ export interface Config {
   lockdown: boolean
   previewEnabled: boolean
   isolatedBrowser: boolean
+  storage: 'auto' | 'bind' | 'volume'
 }
 
 export const Config: z<Config> = z.object({
@@ -102,6 +103,7 @@ export const Config: z<Config> = z.object({
   lockdown: z.boolean().default(false).description('Network none, read-only workspace, no cache and no extra folders'),
   previewEnabled: z.boolean().default(true).description('Preview tab for Code sessions; a session can override it'),
   isolatedBrowser: z.boolean().default(false).description('Preview through Chromium inside the sandbox; a session can override it; Lockdown forces it'),
+  storage: z.union(['auto', 'bind', 'volume'] as const).default('auto').description('Where new checkouts live: auto picks a host folder when the sandbox user can write one, else a Docker volume'),
   newBranch: z.boolean().default(true).description('Give each Code session its own dsh-code/<hash> branch; false works on the chosen branch'),
   defaultAccount: z.string().default('').description('GitHub account (gh login) new Code sessions use; empty uses the gh CLI active account'),
 })
@@ -155,7 +157,7 @@ function settingsOf(config: Config): CodeSettings {
     disabledAccounts: config.disabledAccounts, newBranch: config.newBranch,
     shmMb: config.shmMb, readOnlyWorkspace: config.readOnlyWorkspace, dependencyCache: config.dependencyCache,
     readOnlyFolders: config.readOnlyFolders, environment: config.environment, lockdown: config.lockdown,
-    previewEnabled: config.previewEnabled, isolatedBrowser: config.isolatedBrowser,
+    previewEnabled: config.previewEnabled, isolatedBrowser: config.isolatedBrowser, storage: config.storage,
   }
 }
 
@@ -207,6 +209,7 @@ export class CodeWorkspacesService extends TypertRemoteService {
       uid: config.uid, gid: config.gid, maxWorkspaces: config.maxWorkspaces, previewPorts: config.previewPorts, newBranch: config.newBranch,
       ...sandboxOptions(config),
       sessionReadOnly: sessionId => this.harnessMode(sessionId) === 'read-only',
+      storage: config.storage,
     }, undefined, new Git(gitRunner('git', ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential'])),
     async account => this.github.credentials(account))
     this.previews = new PreviewProxy(async (sessionId, port) => {
@@ -439,7 +442,7 @@ export class CodeWorkspacesService extends TypertRemoteService {
     const applied = record?.options
     const lockdown = applied?.lockdown ?? this.config.lockdown
     const options = applied !== undefined
-      ? { readOnlyWorkspace: applied.readOnlyWorkspace, dependencyCache: applied.cacheDir !== undefined, readOnlyFolders: applied.readOnlyFolders, shmMb: applied.shmMb, lockdown }
+      ? { readOnlyWorkspace: applied.readOnlyWorkspace, dependencyCache: applied.cacheDir !== undefined || applied.cacheVolume !== undefined, readOnlyFolders: applied.readOnlyFolders, shmMb: applied.shmMb, lockdown, storage: record?.storage ?? 'bind' }
       : {
         readOnlyWorkspace: lockdown || this.config.readOnlyWorkspace, dependencyCache: !lockdown && this.config.dependencyCache,
         readOnlyFolders: lockdown ? [] : this.config.readOnlyFolders, shmMb: this.config.shmMb, lockdown,
@@ -477,6 +480,7 @@ export class CodeWorkspacesService extends TypertRemoteService {
     this.manager.config.maxWorkspaces = next.maxWorkspaces
     this.manager.config.previewPorts = next.previewPorts
     this.manager.config.newBranch = next.newBranch
+    this.manager.config.storage = next.storage
     for (const record of this.manager.list()) {
       if (!this.previewOn(record.sessionId)) { this.previews.revoke(record.sessionId); this.browsers.close(record.sessionId) }
       else if (this.isolatedOn(record.sessionId)) this.previews.revoke(record.sessionId)

@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path'
 import { existsSync, statSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { DockerCli } from './docker.ts'
-import { createArgs, execArgs, OWNER_LABEL, REQUIRED_RUNTIME, SESSION_LABEL, type ResourceLimits } from './container-spec.ts'
+import { CACHE_TARGET, createArgs, execArgs, OWNER_LABEL, REQUIRED_RUNTIME, SESSION_LABEL, VOLUME_KIND_LABEL, WORKSPACE_LABEL, type CheckoutStorage, type ResourceLimits } from './container-spec.ts'
 import { unsafeFolderReason } from './mounts.ts'
 import { Git, workingBranchName } from './git.ts'
 import type { RepositoryRef, SelfTestCheck, SelfTestReport, WorkspaceStatus, WorkspaceUsage } from '../types.ts'
@@ -30,6 +30,10 @@ export interface WorkspaceRecord {
   readonly workingBranch: string
   /** Sandbox options the current container was created with. */
   options?: WorkspaceOptions
+  /** Where the checkout lives; records from before volumes have none and are `bind`. */
+  readonly storage?: CheckoutStorage
+  /** The checkout's Docker volume when {@link storage} is `volume`. */
+  readonly volume?: string
   readonly path: string
   readonly mirrorPath: string
   readonly containerName: string
@@ -76,6 +80,8 @@ export interface WorkspaceOptions {
   readonly readOnlyWorkspace: boolean
   /** Host folder of this repository's dependency cache, when the cache is on. */
   readonly cacheDir?: string
+  /** Docker volume of this repository's dependency cache, for a checkout kept in a volume. */
+  readonly cacheVolume?: string
   readonly readOnlyFolders: readonly string[]
   readonly shmMb: number
   readonly lockdown: boolean
@@ -114,6 +120,11 @@ export interface WorkspaceManagerConfig {
   shmMb?: number
   /** Forces a read-only workspace, no cache and no extra folders (network none is applied through the policy). */
   lockdown?: boolean
+  /**
+   * Where new checkouts live: `auto` (default) uses a host folder when the sandbox user can write one on this
+   * Docker host and a Docker volume otherwise; `bind` and `volume` force one. Existing workspaces keep theirs.
+   */
+  storage?: 'auto' | CheckoutStorage
   /** Whether the Harness sandbox mode of a session is read-only (its permission selector); read at container creation. */
   sessionReadOnly?: (sessionId: string) => boolean
   /** Default variables for every workspace; a session's own values override them by name. */
@@ -229,6 +240,15 @@ export class WorkspaceManager {
       checks.push(reach.code === 0
         ? { id: 'data-dir', ok: true, detail: 'workspace folder is reachable by the container user' }
         : { id: 'data-dir', ok: false, detail: `the container user ${this.config.uid} cannot reach ${this.config.dataDir}`, remedy: SETUP_REMEDIES.dataDir })
+      this.storageChoice = this.probeStorage()
+      const storage = await this.storageChoice
+      checks.push(storage === undefined
+        ? { id: 'writable', ok: false, detail: 'the sandbox user can write neither a host folder nor a Docker volume', remedy: SETUP_REMEDIES.dataDir }
+        : storage === 'bind'
+          ? { id: 'writable', ok: true, detail: 'checkouts live in host folders the sandbox user can write' }
+          : this.config.storage === 'bind'
+            ? { id: 'writable', ok: true, warning: true, detail: 'the sandbox user cannot write host folders on this Docker host', remedy: SETUP_REMEDIES.storage }
+            : { id: 'writable', ok: true, detail: 'checkouts live in Docker volumes: the sandbox user cannot write host folders on this Docker host' })
       const tools = await this.docker.tryExec(['run', '--rm', '--runtime', REQUIRED_RUNTIME, '--network', 'none', '--user', `${this.config.uid}:${this.config.gid}`, this.config.image,
         'sh', '-c', `command -v git && command -v bash && command -v rg && node --version && test -r ${FS_HELPER}`])
       checks.push(tools.code === 0
@@ -236,6 +256,88 @@ export class WorkspaceManager {
         : { id: 'worker', ok: false, detail: 'worker image lacks git, bash, ripgrep, Node or the file helper', remedy: SETUP_REMEDIES.image(this.config.image), ...(this.config.workerDir === undefined ? {} : { action: 'build-worker' as const }) })
     }
     return { ok: checks.every(c => c.ok), checks }
+  }
+
+  /** Result of the last storage probe, shared by provisioning and the self test. */
+  private storageChoice: Promise<CheckoutStorage | undefined> | undefined
+
+  /** Labels on every volume this manager owns. */
+  private volumeLabels(kind: 'checkout' | 'cache' | 'probe', workspaceId?: string): string[] {
+    return [`${OWNER_LABEL}=${this.owner}`, `${VOLUME_KIND_LABEL}=${kind}`, ...workspaceId === undefined ? [] : [`${WORKSPACE_LABEL}=${workspaceId}`]]
+  }
+
+  /** A short-lived trusted container on one volume: gVisor, no network, no capabilities unless named. */
+  private oneShot(volume: string, target: string, user: string, caps: readonly string[], interactive: boolean): string[] {
+    return ['run', '--rm', ...interactive ? ['-i'] : [], '--runtime', REQUIRED_RUNTIME, '--network', 'none', '--user', user,
+      '--cap-drop', 'ALL', ...caps.flatMap(c => ['--cap-add', c]), '--security-opt', 'no-new-privileges', '--read-only',
+      '--tmpfs', '/tmp:rw,nosuid,nodev,size=64m', '--env', 'HOME=/tmp', '--label', `${OWNER_LABEL}=${this.owner}`,
+      '--mount', `type=volume,source=${volume},target=${target}`, this.config.image]
+  }
+
+  /**
+   * Create a volume and give its root to the sandbox user. The chown runs once, in gVisor, with only CAP_CHOWN, on
+   * an empty volume: nothing of the repository exists yet.
+   */
+  private async createOwnedVolume(volume: string, target: string, labels: readonly string[]): Promise<void> {
+    if (!(await this.docker.ensureVolume(volume, labels))) return
+    await this.docker.exec([...this.oneShot(volume, target, '0:0', ['CHOWN'], false), 'chown', `${this.config.uid}:${this.config.gid}`, target])
+  }
+
+  /**
+   * Which storage this Docker host supports for the sandbox user: a host folder first, then a Docker volume.
+   * @returns the first that works, or undefined when neither does.
+   */
+  private async probeStorage(): Promise<CheckoutStorage | undefined> {
+    const user = `${this.config.uid}:${this.config.gid}`
+    const write = 'mkdir -p /probe/d/e && echo ok > /probe/d/e/f && rm -r /probe/d'
+    if (this.config.storage !== 'volume') {
+      const dir = join(this.config.dataDir, 'workspaces', `.write-probe-${randomUUID().slice(0, 8)}`)
+      await mkdir(dir, { recursive: true })
+      await chownTree(dir, this.config.uid, this.config.gid)
+      try {
+        const bind = await this.docker.tryExec(['run', '--rm', '--runtime', REQUIRED_RUNTIME, '--network', 'none', '--user', user,
+          '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only',
+          '--mount', `type=bind,source=${dir},target=/probe`, this.config.image, 'sh', '-c', write])
+        if (bind.code === 0) return 'bind'
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    }
+    const volume = `${this.namespace}-probe-${randomUUID().slice(0, 8)}`
+    try {
+      await this.createOwnedVolume(volume, '/probe', this.volumeLabels('probe'))
+      const probe = await this.docker.tryExec([...this.oneShot(volume, '/probe', user, [], false), 'sh', '-c', write])
+      return probe.code === 0 ? 'volume' : undefined
+    } catch {
+      return undefined
+    } finally {
+      await this.docker.removeVolume(volume).catch(() => undefined)
+    }
+  }
+
+  /** Storage for a new checkout: forced by config, or the probe's answer (cached). */
+  private async storageFor(): Promise<CheckoutStorage> {
+    if (this.config.storage === 'bind' || this.config.storage === 'volume') return this.config.storage
+    this.storageChoice ??= this.probeStorage()
+    const choice = await this.storageChoice
+    if (choice === undefined) {
+      this.storageChoice = undefined
+      throw new WorkspaceError('unsafe-state', 'the sandbox user can write neither a host folder nor a Docker volume on this Docker host')
+    }
+    return choice
+  }
+
+  /**
+   * Put a trusted bundle's base branch into an empty checkout volume and create the working branch, as the sandbox
+   * user in a one-shot container. Git runs only inside the sandbox; the host only made the bundle.
+   */
+  private async importCheckout(volume: string, path: string, bundle: string, baseBranch: string, workingBranch: string, cloneUrl: string): Promise<void> {
+    const script = [
+      'set -e', 'cd "$1"', 'cat > .dsh-code-import.bundle', 'git init -q',
+      'git fetch -q --no-tags ./.dsh-code-import.bundle "refs/heads/$2:refs/remotes/origin/$2"', 'rm -f .dsh-code-import.bundle',
+      'git remote add origin "$4"', 'git checkout -q -b "$2" "refs/remotes/origin/$2"', '[ "$3" = "$2" ] || git checkout -q -b "$3"',
+    ].join('\n')
+    await this.docker.stream([...this.oneShot(volume, path, `${this.config.uid}:${this.config.gid}`, [], true), 'sh', '-c', script, 'import', path, baseBranch, workingBranch, cloneUrl], { input: bundle })
   }
 
   /**
@@ -309,6 +411,13 @@ export class WorkspaceManager {
       if (!this.records.has(sessionId)) {
         await this.docker.removeContainer(id)
         orphansRemoved.push(id)
+      }
+    }
+    const volumes = new Set([...this.records.values()].flatMap(r => r.volume === undefined ? [] : [r.volume]))
+    for (const volume of await this.docker.volumesWithLabel(`${OWNER_LABEL}=${this.owner}`)) {
+      if (volume.labels[VOLUME_KIND_LABEL] === 'checkout' && !volumes.has(volume.name)) {
+        await this.docker.removeVolume(volume.name)
+        orphansRemoved.push(volume.name)
       }
     }
     const offline: string[] = []
@@ -591,7 +700,7 @@ export class WorkspaceManager {
    * The options a new container gets now: Lockdown forces a read-only checkout, no cache and no extra folders.
    * Folders that are unsafe, missing, not directories or inside dataDir are skipped and reported, never fatal.
    */
-  private async optionsFor(repository: RepositoryRef, onProgress: (step: string, detail?: string) => void, sessionId: string): Promise<WorkspaceOptions> {
+  private async optionsFor(repository: RepositoryRef, onProgress: (step: string, detail?: string) => void, sessionId: string, storage: CheckoutStorage = 'bind'): Promise<WorkspaceOptions> {
     const lockdown = this.config.lockdown === true
     const folders: string[] = []
     for (const folder of lockdown ? [] : this.config.readOnlyFolders ?? []) {
@@ -603,7 +712,12 @@ export class WorkspaceManager {
       else onProgress('folder-skipped', `${folder}: ${reason}`)
     }
     let cacheDir: string | undefined
-    if (!lockdown && this.config.dependencyCache === true) {
+    let cacheVolume: string | undefined
+    if (!lockdown && this.config.dependencyCache === true && storage === 'volume') {
+      // Same rule as the folder: one cache volume per repository.
+      cacheVolume = `${this.namespace}-cache-${createHash('sha256').update(repository.fullName).digest('hex').slice(0, 16)}`
+      await this.createOwnedVolume(cacheVolume, CACHE_TARGET, this.volumeLabels('cache'))
+    } else if (!lockdown && this.config.dependencyCache === true) {
       // One cache per repository: a repository can never plant packages in another one's cache.
       cacheDir = join(this.config.dataDir, 'caches', repository.fullName.replace(/[^A-Za-z0-9._-]+/g, '__'))
       await mkdir(cacheDir, { recursive: true, mode: 0o700 })
@@ -611,7 +725,7 @@ export class WorkspaceManager {
     }
     return {
       readOnlyWorkspace: lockdown || this.config.readOnlyWorkspace === true || this.config.sessionReadOnly?.(sessionId) === true, readOnlyFolders: folders,
-      shmMb: this.config.shmMb ?? 256, lockdown, ...cacheDir === undefined ? {} : { cacheDir },
+      shmMb: this.config.shmMb ?? 256, lockdown, ...cacheDir === undefined ? {} : { cacheDir }, ...cacheVolume === undefined ? {} : { cacheVolume },
     }
   }
 
@@ -701,13 +815,35 @@ export class WorkspaceManager {
       const workingBranch = this.config.newBranch === false ? baseBranch : workingBranchName()
       await mkdir(join(this.config.dataDir, 'workspaces'), { recursive: true })
       await mkdir(join(this.config.dataDir, 'mirrors'), { recursive: true })
+      const storage = await this.storageFor()
       onProgress('cloning')
       const git = await this.gitAs(account)
-      const checkout = await git.prepareCheckout(repository, baseBranch, path, workingBranch)
-      await git.createMirror(repository, mirrorPath)
-      await chownTree(path, this.config.uid, this.config.gid)
+      let baseCommit: string
+      let volume: string | undefined
+      if (storage === 'volume') {
+        // The host clones into its own bare mirror, then hands the sandbox a bundle; the checkout exists only in
+        // the volume, and the folder at `path` stays an empty placeholder for the Harness working directory.
+        baseCommit = await git.cloneMirror(repository, baseBranch, mirrorPath)
+        const bundle = `${mirrorPath}.in.bundle`
+        try {
+          await git.bundleBranch(mirrorPath, baseBranch, bundle)
+          volume = `${this.namespace}-ws-${workspaceId}`
+          onProgress('checkout-volume')
+          await this.createOwnedVolume(volume, path, this.volumeLabels('checkout', workspaceId))
+          await this.importCheckout(volume, path, bundle, baseBranch, workingBranch, repository.cloneUrl)
+        } finally {
+          await rm(bundle, { force: true })
+        }
+        await mkdir(path, { recursive: true })
+      } else {
+        const checkout = await git.prepareCheckout(repository, baseBranch, path, workingBranch)
+        baseCommit = checkout.baseCommit
+        await git.createMirror(repository, mirrorPath)
+        await chownTree(path, this.config.uid, this.config.gid)
+      }
       record = {
-        workspaceId, sessionId, repository, ...account === '' ? {} : { account }, baseBranch, baseCommit: checkout.baseCommit, workingBranch,
+        storage, ...volume === undefined ? {} : { volume },
+        workspaceId, sessionId, repository, ...account === '' ? {} : { account }, baseBranch, baseCommit, workingBranch,
         path, mirrorPath, containerName: `${this.namespace}-${workspaceId.slice(0, 12)}`, image: this.config.image,
         runtime: REQUIRED_RUNTIME, status: 'provisioning', createdAt: now, updatedAt: now,
       }
@@ -722,12 +858,14 @@ export class WorkspaceManager {
       if (this.addresses.delete(sessionId)) await this.writePolicy()
       await this.docker.removeContainer(record.containerName)
       const proxyAddress = await this.proxyAddress()
-      const options = await this.optionsFor(record.repository, onProgress, sessionId)
+      const options = await this.optionsFor(record.repository, onProgress, sessionId, record.storage)
       record.options = options
       await this.save(record)
       await this.docker.exec(createArgs({
         readOnlyWorkspace: options.readOnlyWorkspace, readOnlyFolders: options.readOnlyFolders, shmMb: options.shmMb,
         ...options.cacheDir === undefined ? {} : { cacheDir: options.cacheDir },
+        ...options.cacheVolume === undefined ? {} : { cacheVolume: options.cacheVolume },
+        ...record.storage === 'volume' ? { storage: 'volume' as const, volume: record.volume } : {},
         name: record.containerName, owner: this.owner, image: record.image, sessionId, workspaceId,
         workspacePath: record.path, network: this.internalNetwork,
         proxyUrl: this.config.policy.mode === 'none' ? undefined : `http://${this.proxyContainer}:${PROXY_PORT}`,
@@ -830,10 +968,10 @@ export class WorkspaceManager {
     if (staged !== '') {
       await this.runInside(record, ['git', '-c', 'user.name=DeepSeek Harness Code', '-c', 'user.email=dsh-code@users.noreply.github.com', 'commit', '-q', '-m', message])
     }
-    const outbox = join(record.path, '.git', 'dsh-code-outbox.bundle')
-    await this.runInside(record, ['git', 'bundle', 'create', '-q', outbox, `refs/heads/${record.workingBranch}`])
+    // The bundle streams out of the sandbox on stdout into a host-only file: the host never opens a path in the
+    // sandbox-writable checkout, and `bundle verify` checks it before the mirror fetches from it.
     const copy = `${record.mirrorPath}.bundle`
-    await copyRegularFile(outbox, copy)
+    await this.docker.stream(this.execArgv(record, ['git', 'bundle', 'create', '-q', '-', `refs/heads/${record.workingBranch}`], record.path, {}, false), { output: copy, maxBytes: MAX_BUNDLE_BYTES })
     try {
       const sha = await (await this.gitAs(record.account)).pushFromBundle(record.mirrorPath, copy, record.workingBranch)
       return { sha, branch: record.workingBranch }
@@ -859,6 +997,7 @@ export class WorkspaceManager {
     if (record === undefined) return
     await this.setStatus(record, 'deleting')
     await this.docker.removeContainer(record.containerName)
+    if (record.volume !== undefined) await this.docker.removeVolume(record.volume)
     await rm(record.path, { recursive: true, force: true })
     await rm(record.mirrorPath, { recursive: true, force: true })
     await this.setStatus(record, 'deleted')
@@ -913,6 +1052,7 @@ export const SETUP_REMEDIES = {
   docker: 'Install Docker Engine (https://docs.docker.com/engine/install/) and start it, then make sure the user running Harness may use it.',
   runtime: 'Install gVisor (https://gvisor.dev/docs/user_guide/install/), register it with `sudo runsc install`, then `sudo systemctl reload docker`. Code never falls back to ordinary Docker.',
   image: (image: string): string => `Build the worker image: \`docker build -t ${image} <package>/worker\` after \`pnpm run build\`, or use Build worker image.`,
+  storage: 'Set Checkout storage to Automatic in Settings > Code: new checkouts then live in Docker volumes, which the sandbox user can write.',
   dataDir: 'Choose a data folder the container user can traverse, outside a private home directory (Settings > Code needs a restart for this one, or set dataDir in cordis.patch.yml).',
 } as const
 
@@ -949,16 +1089,8 @@ export function parseStats(line: string, limits: ResourceLimits, diskBytes: numb
   }
 }
 
-/** Copy a file out of a sandbox-writable tree, refusing symlinks and special files. */
-async function copyRegularFile(source: string, destination: string): Promise<void> {
-  const handle = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW)
-  try {
-    if (!(await handle.stat()).isFile()) throw new WorkspaceError('unsafe-state', 'sandbox output is not a regular file')
-    await writeFile(destination, await handle.readFile(), { mode: 0o600 })
-  } finally {
-    await handle.close()
-  }
-}
+/** Largest push bundle accepted from a workspace. */
+export const MAX_BUNDLE_BYTES = 2 * 1024 ** 3
 
 /**
  * Give a fresh checkout to the sandbox user when Harness runs as root; a no-op otherwise.

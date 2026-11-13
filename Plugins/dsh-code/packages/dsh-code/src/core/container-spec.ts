@@ -15,6 +15,15 @@ export const OWNER_LABEL = 'io.github.gabrielbav.dsh-code'
 export const SESSION_LABEL = `${OWNER_LABEL}.session`
 /** Label carrying the workspace id. */
 export const WORKSPACE_LABEL = `${OWNER_LABEL}.workspace`
+/** Label on Docker volumes: `checkout` or `cache`. */
+export const VOLUME_KIND_LABEL = `${OWNER_LABEL}.volume`
+
+/**
+ * Where a session's checkout lives. `bind` is a host folder under dataDir mounted at the same path. `volume` is a
+ * Docker volume on the Docker host, mounted at that same path, with an empty placeholder folder on the host: for
+ * hosts whose shared folders the sandbox user cannot write (macOS with Colima), and for a remote Docker host.
+ */
+export type CheckoutStorage = 'bind' | 'volume'
 
 /** Resource limits for one workspace container. */
 export interface ResourceLimits {
@@ -54,7 +63,15 @@ export interface ContainerSpec {
   readonly readOnlyFolders?: readonly string[]
   /** Size of /dev/shm in MB (headless browsers need more than Docker's 64 MB). */
   readonly shmMb?: number
+  /** Where the checkout lives; `bind` when absent. */
+  readonly storage?: CheckoutStorage
+  /** The checkout volume, required when {@link storage} is `volume`. */
+  readonly volume?: string
+  /** Docker volume for this repository's dependency caches, instead of {@link cacheDir}. */
+  readonly cacheVolume?: string
 }
+
+const DOCKER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/
 
 /** Where a repository's dependency cache is mounted inside the container. */
 export const CACHE_TARGET = '/opt/dsh-cache'
@@ -81,7 +98,9 @@ export function validateSpec(spec: ContainerSpec): void {
     throw new Error(`refusing to mount a home or root directory: ${spec.workspacePath}`)
   }
   if (spec.uid === 0) throw new Error('workspace containers must not run as root')
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(spec.name)) throw new Error(`invalid container name: ${spec.name}`)
+  if (!DOCKER_NAME.test(spec.name)) throw new Error(`invalid container name: ${spec.name}`)
+  if (spec.storage === 'volume' && (spec.volume === undefined || !DOCKER_NAME.test(spec.volume))) throw new Error(`invalid checkout volume: ${String(spec.volume)}`)
+  if (spec.cacheVolume !== undefined && (!DOCKER_NAME.test(spec.cacheVolume) || spec.cacheDir !== undefined)) throw new Error(`invalid cache volume: ${spec.cacheVolume}`)
   for (const [key, value] of [['cpus', spec.limits.cpus], ['memoryMb', spec.limits.memoryMb], ['pids', spec.limits.pids], ['tmpMb', spec.limits.tmpMb]] as const) {
     if (!(value > 0) || !Number.isFinite(value)) throw new Error(`limit ${key} must be a positive number`)
   }
@@ -107,7 +126,7 @@ export function createArgs(spec: ContainerSpec): string[] {
   validateSpec(spec)
   const env: Record<string, string> = {
     HOME: '/tmp/home',
-    ...spec.cacheDir === undefined ? {} : cacheEnvironment(),
+    ...spec.cacheDir === undefined && spec.cacheVolume === undefined ? {} : cacheEnvironment(),
     ...spec.env,
   }
   if (spec.proxyUrl !== undefined) {
@@ -136,12 +155,14 @@ export function createArgs(spec: ContainerSpec): string[] {
     // The worker resolves nothing itself; the egress proxy resolves names.
     // Pointing DNS at an unroutable address blocks DNS tunnelling.
     '--dns', '127.0.0.1',
-    '--mount', `type=bind,source=${spec.workspacePath},target=${spec.workspacePath}${spec.readOnlyWorkspace === true ? ',readonly' : ''}`,
-    '--workdir', spec.workspacePath,
+    '--mount', `${spec.storage === 'volume' ? `type=volume,source=${spec.volume}` : `type=bind,source=${spec.workspacePath}`},target=${spec.workspacePath}${spec.readOnlyWorkspace === true ? ',readonly' : ''}`,
+    // No --workdir: on gVisor, a create-time working directory on a mount makes that mount read as owned by root,
+    // so the sandbox user could not write it. Every exec passes its own -w.
     '--init',
   ]
   if (spec.shmMb !== undefined) args.push('--shm-size', `${spec.shmMb}m`)
   if (spec.cacheDir !== undefined) args.push('--mount', `type=bind,source=${spec.cacheDir},target=${CACHE_TARGET}`)
+  if (spec.cacheVolume !== undefined) args.push('--mount', `type=volume,source=${spec.cacheVolume},target=${CACHE_TARGET}`)
   for (const folder of spec.readOnlyFolders ?? []) args.push('--mount', `type=bind,source=${folder},target=${folder},readonly`)
   for (const [host, address] of Object.entries(spec.hosts ?? {})) args.push('--add-host', `${host}:${address}`)
   for (const [key, value] of Object.entries(env)) args.push('--env', `${key}=${value}`)

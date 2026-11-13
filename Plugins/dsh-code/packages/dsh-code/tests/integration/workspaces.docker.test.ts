@@ -6,9 +6,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { request } from 'node:http'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { OWNER_LABEL, VOLUME_KIND_LABEL } from '../../src/core/container-spec.ts'
 import { DockerCli } from '../../src/core/docker.ts'
 import { WorkspaceManager, type WorkspaceRecord } from '../../src/core/workspaces.ts'
 import { DEFAULT_ALLOW, type EgressPolicy } from '../../src/egress/policy.ts'
@@ -62,13 +63,39 @@ describe.runIf(enabled)('workspaces on Docker + gVisor', () => {
     await docker.tryExec(['rm', '-f', UPSTREAM])
     await docker.tryExec(['rm', '-f', manager.proxyContainer])
     await docker.tryExec(['network', 'rm', manager.internalNetwork, manager.egressNetwork])
+    // Checkout, cache and probe volumes of this namespace only.
+    for (const volume of await docker.volumesWithLabel(`${OWNER_LABEL}=${manager.internalNetwork.replace(/-internal$/, '')}`)) await docker.removeVolume(volume.name)
     rmSync(root, { recursive: true, force: true })
   }, 120_000)
 
   it('passes the mandatory self test', async () => {
     const report = await manager.selfTest()
     expect(report.checks.filter(c => !c.ok)).toEqual([])
+    expect(report.checks.find(c => c.id === 'writable')).toMatchObject({ ok: true })
   }, 60_000)
+
+  it('keeps a checkout in a Docker volume that the non-root sandbox user writes, commits and pushes from', async () => {
+    const saved = manager.config.storage
+    manager.config.storage = 'volume'
+    try {
+      const v = await manager.provision('session-vol', repo, 'main')
+      expect(v.storage).toBe('volume')
+      expect(await manager.runInside(v, ['id', '-u'])).toBe('1000')
+      expect(await manager.runInside(v, ['cat', 'README.md'])).toBe('# seed')
+      expect(await manager.runInside(v, ['git', 'rev-parse', '--abbrev-ref', 'HEAD'])).toBe(v.workingBranch)
+      expect(await manager.runInside(v, ['git', 'rev-parse', 'HEAD'])).toBe(v.baseCommit)
+      for (let i = 0; i < 20; i++) await manager.runInside(v, ['sh', '-c', `mkdir -p d${i}/x && echo ${i} > d${i}/x/f && git config t.k${i} ${i}`])
+      expect(await manager.pendingWork('session-vol')).toMatchObject({ unpushedCommits: 0 })
+      const pushed = await manager.commitAndPush('session-vol', 'volume change')
+      expect(execFileSync('git', ['-C', origin, 'rev-parse', `refs/heads/${v.workingBranch}`]).toString().trim()).toBe(pushed.sha)
+      expect(readdirSync(v.path)).toEqual([])
+      await manager.delete('session-vol')
+      expect((await docker.tryExec(['volume', 'inspect', v.volume!])).code).not.toBe(0)
+    } finally {
+      manager.config.storage = saved
+      await manager.delete('session-vol').catch(() => undefined)
+    }
+  }, 180_000)
 
   it('runs the worker under gVisor as a non-root user with the checkout mounted', async () => {
     expect(await manager.runInside(a, ['sh', '-c', 'dmesg | head -n 1'])).toMatch(/gVisor/)
@@ -86,7 +113,9 @@ describe.runIf(enabled)('workspaces on Docker + gVisor', () => {
 
   it('keeps parallel sessions on separate filesystems', async () => {
     await manager.runInside(a, ['sh', '-c', 'echo from-a > only-a.txt'])
-    expect(existsSync(join(a.path, 'only-a.txt'))).toBe(true)
+    expect(await manager.runInside(a, ['cat', 'only-a.txt'])).toBe('from-a')
+    // A host-folder checkout shows the file on the host; a volume checkout leaves only an empty placeholder there.
+    expect(existsSync(join(a.path, 'only-a.txt'))).toBe(a.storage !== 'volume')
     expect(await manager.runInside(b, ['sh', '-c', 'ls only-a.txt 2>/dev/null || echo missing'])).toBe('missing')
     expect(await manager.runInside(a, ['sh', '-c', `ls ${b.path} 2>/dev/null || echo missing`])).toBe('missing')
   }, 60_000)
@@ -115,7 +144,8 @@ describe.runIf(enabled)('workspaces on Docker + gVisor', () => {
       }
     } finally {
       client.close()
-      await manager.runInside(a, ['sh', '-c', 'pkill -f "ln -sfn" || true; rm -f link'])
+      // "[l]n" keeps pkill from matching this command line itself.
+      await manager.runInside(a, ['sh', '-c', 'pkill -f "[l]n -sfn" || true; rm -f link'])
     }
     expect(seen.has('host secret\n')).toBe(false)
     expect(seen.has('workspace\n')).toBe(true)
@@ -182,7 +212,10 @@ describe.runIf(enabled)('workspaces on Docker + gVisor', () => {
 
   it('commits inside the sandbox and pushes only the session branch from the host mirror', async () => {
     await manager.runInside(a, ['sh', '-c', 'echo change >> README.md'])
-    expect(await manager.pendingWork('session-a')).toMatchObject({ dirtyFiles: 2 })
+    // Earlier cases left files in this checkout too; the count must match what git itself reports.
+    const status = await manager.runInside(a, ['git', 'status', '--porcelain'])
+    expect(status).toContain('README.md')
+    expect(await manager.pendingWork('session-a')).toMatchObject({ dirtyFiles: status.split('\n').filter(l => l !== '').length })
     expect(await manager.diff('session-a')).toContain('+change')
     const pushed = await manager.commitAndPush('session-a', 'Code session change')
     expect(execFileSync('git', ['-C', origin, 'rev-parse', `refs/heads/${a.workingBranch}`]).toString().trim()).toBe(pushed.sha)
@@ -217,14 +250,19 @@ describe.runIf(enabled)('workspaces on Docker + gVisor', () => {
   }, 60_000)
 
   it('reconciles after a restart and cleans up everything it owns', async () => {
+    // A checkout volume no record owns (a crash between creating it and saving the record) is removed.
+    const stray = `${manager.internalNetwork.replace(/-internal$/, '')}-ws-stray`
+    await docker.exec(['volume', 'create', '--label', `${OWNER_LABEL}=${manager.internalNetwork.replace(/-internal$/, '')}`, '--label', `${VOLUME_KIND_LABEL}=checkout`, stray])
     const fresh = new WorkspaceManager(manager.config)
     const report = await fresh.reconcile()
+    expect(report.orphansRemoved).toContain(stray)
     expect(report.offline).toEqual([])
     expect(fresh.get('session-b')?.status).toBe('ready')
     await fresh.delete('session-b')
     expect(await docker.inspect(b.containerName)).toBeUndefined()
     expect(existsSync(b.path)).toBe(false)
     expect(existsSync(b.mirrorPath)).toBe(false)
+    if (b.volume !== undefined) expect((await docker.tryExec(['volume', 'inspect', b.volume])).code).not.toBe(0)
     expect(readFileSync(join(origin, 'HEAD'), 'utf8')).toContain('main')
   }, 90_000)
 

@@ -4,7 +4,9 @@
  * mounts or exposes the Docker socket to a workspace, and tests can replace
  * the runner without a daemon.
  */
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { rm } from 'node:fs/promises'
 
 /** Result of one Docker CLI invocation. */
 export interface DockerResult {
@@ -48,8 +50,94 @@ export function processRunner(binary = 'docker'): DockerRunner {
 
 /** Docker operations used by the workspace manager. */
 export class DockerCli {
-  /** @param run - the CLI runner. */
-  constructor(private readonly run: DockerRunner = processRunner()) {}
+  /**
+   * @param run - the CLI runner.
+   * @param binary - docker executable for streamed calls ({@link DockerCli.stream}).
+   */
+  constructor(private readonly run: DockerRunner = processRunner(), private readonly binary = 'docker') {}
+
+  /**
+   * Run docker with stdin from a file and/or stdout to a file, for Git bundles moved in and out of a workspace
+   * without the host touching its checkout. A partial output file is removed on failure.
+   * @param args - docker argv.
+   * @param options - input file, output file and the most bytes the output may have.
+   * @returns resolves on exit 0; rejects with {@link DockerError} otherwise.
+   */
+  stream(args: readonly string[], options: { readonly input?: string; readonly output?: string; readonly maxBytes?: number }): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.binary, [...args], { stdio: [options.input === undefined ? 'ignore' : 'pipe', options.output === undefined ? 'ignore' : 'pipe', 'pipe'] })
+      let stderr = ''
+      let failure: Error | undefined
+      child.stderr?.setEncoding('utf8')
+      child.stderr?.on('data', (chunk: string) => { if (stderr.length < 8192) stderr += chunk })
+      if (options.input !== undefined && child.stdin !== null) {
+        const source = createReadStream(options.input)
+        source.on('error', (error) => { failure = error; child.kill() })
+        source.pipe(child.stdin)
+        child.stdin.on('error', () => { /* the process exited early; its exit code reports why */ })
+      }
+      const sink = options.output === undefined ? undefined : createWriteStream(options.output, { mode: 0o600 })
+      if (sink !== undefined && child.stdout !== null) {
+        let bytes = 0
+        child.stdout.on('data', (chunk: Buffer) => {
+          bytes += chunk.length
+          if (options.maxBytes !== undefined && bytes > options.maxBytes) {
+            failure = new Error(`output exceeds ${options.maxBytes} bytes`)
+            child.kill()
+          }
+        })
+        child.stdout.pipe(sink)
+      }
+      child.on('error', reject)
+      child.on('close', (code) => {
+        const finish = (): void => {
+          if (failure === undefined && code === 0) { resolve(); return }
+          const error = failure ?? new DockerError(args, { code: code ?? 1, stdout: '', stderr })
+          if (options.output === undefined) reject(error)
+          else void rm(options.output, { force: true }).finally(() => { reject(error) })
+        }
+        if (sink === undefined) finish()
+        else sink.end(finish)
+      })
+    })
+  }
+
+  /**
+   * Create a labelled volume if it does not exist.
+   * @param name - volume name.
+   * @param labels - `key=value` labels.
+   * @returns whether it was created now.
+   */
+  async ensureVolume(name: string, labels: readonly string[]): Promise<boolean> {
+    if ((await this.run(['volume', 'inspect', name])).code === 0) return false
+    await this.exec(['volume', 'create', ...labels.flatMap(l => ['--label', l]), name])
+    return true
+  }
+
+  /**
+   * Remove a volume if present.
+   * @param name - volume name.
+   */
+  async removeVolume(name: string): Promise<void> {
+    const result = await this.run(['volume', 'rm', '-f', name])
+    if (result.code !== 0 && !/no such volume/i.test(result.stderr)) throw new DockerError(['volume', 'rm', '-f', name], result)
+  }
+
+  /**
+   * List volumes carrying a label, with their labels.
+   * @param label - `key=value` label filter.
+   * @returns volume names and labels.
+   */
+  async volumesWithLabel(label: string): Promise<{ name: string; labels: Record<string, string> }[]> {
+    const out = await this.exec(['volume', 'ls', '--filter', `label=${label}`, '--format', '{{.Name}}'])
+    const names = out === '' ? [] : out.split('\n')
+    const result: { name: string; labels: Record<string, string> }[] = []
+    for (const name of names) {
+      const info = await this.run(['volume', 'inspect', '--format', '{{json .Labels}}', name])
+      result.push({ name, labels: info.code === 0 ? JSON.parse(info.stdout.trim() || '{}') as Record<string, string> : {} })
+    }
+    return result
+  }
 
   /**
    * Run docker and throw {@link DockerError} on non-zero exit.

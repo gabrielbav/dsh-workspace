@@ -30,6 +30,20 @@ describe('container spec', () => {
     expect(() => createArgs({ ...spec, limits: { ...spec.limits, pids: 0 } })).toThrow(/pids/)
   })
 
+  it('mounts a volume checkout and cache at the same targets, and never sets a create-time working directory', () => {
+    const args = createArgs({ ...spec, storage: 'volume', volume: 'dsh-code-ws-w1', cacheVolume: 'dsh-code-cache-abc', readOnlyWorkspace: true })
+    const pairs = (flag: string) => args.flatMap((a, i) => a === flag ? [args[i + 1]] : [])
+    expect(pairs('--mount')).toEqual([
+      'type=volume,source=dsh-code-ws-w1,target=/srv/dsh-code/workspaces/w1,readonly',
+      'type=volume,source=dsh-code-cache-abc,target=/opt/dsh-cache',
+    ])
+    expect(pairs('--env')).toContain('NPM_CONFIG_CACHE=/opt/dsh-cache/npm')
+    expect(args).not.toContain('--workdir')
+    expect(createArgs(spec)).not.toContain('--workdir')
+    expect(() => createArgs({ ...spec, storage: 'volume' })).toThrow(/volume/)
+    expect(() => createArgs({ ...spec, storage: 'volume', volume: '../x' })).toThrow(/volume/)
+  })
+
   it('builds exec argv with cwd, env and optional tty', () => {
     expect(execArgs('c', ['bash', '-lc', 'ls'], '/w', { A: '1' }, false)).toEqual(['exec', '-i', '-w', '/w', '-e', 'A=1', 'c', 'bash', '-lc', 'ls'])
     expect(execArgs('c', ['sh'], '/w', {}, true).slice(0, 3)).toEqual(['exec', '-i', '-t'])

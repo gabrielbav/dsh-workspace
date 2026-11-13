@@ -110,6 +110,28 @@ export class Git {
   }
 
   /**
+   * Clone the base branch into the host-owned bare mirror, for a checkout that lives in a Docker volume.
+   * @param repo - repository.
+   * @param baseBranch - base branch.
+   * @param mirrorPath - host-only directory for the bare mirror.
+   * @returns the base commit.
+   */
+  async cloneMirror(repo: RepositoryRef, baseBranch: string, mirrorPath: string): Promise<string> {
+    await this.run(['clone', '--bare', '--branch', baseBranch, '--single-branch', '--no-tags', '--', repo.cloneUrl, mirrorPath])
+    return this.run(['rev-parse', `refs/heads/${baseBranch}`], mirrorPath)
+  }
+
+  /**
+   * Write one branch of the mirror to a bundle file, which the sandbox imports.
+   * @param mirrorPath - host-only bare mirror.
+   * @param branch - branch to bundle.
+   * @param bundlePath - host-only output file.
+   */
+  async bundleBranch(mirrorPath: string, branch: string, bundlePath: string): Promise<void> {
+    await this.run(['bundle', 'create', '-q', bundlePath, `refs/heads/${branch}`], mirrorPath)
+  }
+
+  /**
    * Create the host-owned bare mirror that pushes on the session's behalf.
    * The workspace checkout is writable by the sandbox, so the host never runs
    * Git with the workspace's own configuration; it fetches from it as an

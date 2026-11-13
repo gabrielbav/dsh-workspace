@@ -13,6 +13,8 @@ export interface SelfTestCheck {
   readonly remedy?: string
   /** A fix Code can run itself, with the user's consent. */
   readonly action?: 'build-worker'
+  /** Passing, but something works only partly; shown with its remedy and never blocks Code. */
+  readonly warning?: boolean
 }
 
 /** Mandatory-check report; Code stays disabled unless `ok`. */
@@ -102,6 +104,8 @@ export interface SessionEnvironment {
     readonly readOnlyFolders: readonly string[]
     readonly shmMb: number
     readonly lockdown: boolean
+    /** Where the checkout lives (or would, before the first message). */
+    readonly storage?: 'bind' | 'volume'
   }
   /** Provisioning steps of the latest start, oldest first. */
   readonly steps?: readonly ProvisionStep[]
@@ -155,6 +159,8 @@ export interface CodeSettings {
   readonly previewEnabled: boolean
   /** Preview through Chromium inside the sandbox instead of the viewer's browser (a session can override it). */
   readonly isolatedBrowser: boolean
+  /** Where new checkouts live: automatic, a host folder, or a Docker volume on the Docker host. */
+  readonly storage: 'auto' | 'bind' | 'volume'
 }
 
 /** Settings plus whether they can be saved to the profile. */
