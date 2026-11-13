@@ -1,0 +1,7 @@
+# Mounts the Host half when the bundle is installed into a profile. It starts after the MCP manager and the
+# credentials store it uses. The browser half (the AWS settings page) is discovered from the `dsh.client`
+# declaration in package.json.
+- insert:
+    - id: aws
+      name: "@gabrielbav/dsh-plugin-aws"
+      inject: [credentials, mcpManager]
