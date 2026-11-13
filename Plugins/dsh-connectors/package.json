@@ -1,6 +1,6 @@
 {
   "name": "@gabrielbav/dsh-connectors",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Connectors for DeepSeek Harness: a Connectors page in Settings that connects remote MCP servers such as Granola (OAuth) and GitHub (personal access token)",
   "license": "MIT",
   "repository": {

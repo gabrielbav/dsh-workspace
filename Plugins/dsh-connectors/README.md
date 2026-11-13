@@ -2,14 +2,13 @@
 
 Adds a **Connectors** page to Settings, like the connectors page in Claude. Each connector adds an MCP server to DSH, so every session in that dsh (chats, subagents, automation tasks) can use its tools, named `mcp__<connector>__<tool>`. The page lists the connectors in a table (**Connector**, **Type**, **Authorization**, **Status**) with a search field, and an **Add** menu for your own.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/connectors-dark.png">
-  <img alt="The Connectors page in DSH Settings: Granola, Linear and Jira & Confluence connected, the other connectors ready to connect" src="https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/connectors.png" width="720">
-</picture>
+![The Connectors page in DSH Settings: Granola, Linear and Jira & Confluence connected, the other connectors ready to connect](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/connectors.png)
 
 | Add a connector | Custom MCP server | Token sign-in |
 |---|---|---|
-| <img alt="Add menu: custom connector or npm package" src="https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/add-menu.png" width="240"> | <img alt="Add a custom connector dialog with a name and an MCP URL" src="https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/custom-connector.png" width="240"> | <img alt="Connect Azure DevOps dialog with organization and personal access token" src="https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/token-dialog.png" width="240"> |
+| ![Add menu: custom connector or npm package](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/add-menu.png) | ![Add a custom connector dialog with a name and an MCP URL](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/custom-connector.png) | ![Connect Azure DevOps dialog with organization and personal access token](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/token-dialog.png) |
+
+![The Connectors page in dark mode](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/connectors-dark.png)
 
 | Connector | Authorization | Server |
 |---|---|---|
