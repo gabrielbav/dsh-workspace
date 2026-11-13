@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Connectors",
+    "description": "Connect remote MCP servers from a Connectors page in Settings: Granola signs in with OAuth, GitHub uses a personal access token."
+  }
+}

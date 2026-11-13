@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Conectores",
+    "description": "Conecte servidores MCP remotos pela página Conectores nas Configurações: o Granola entra com OAuth e o GitHub usa um token de acesso pessoal."
+  }
+}
