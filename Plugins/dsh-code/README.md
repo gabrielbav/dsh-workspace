@@ -7,7 +7,7 @@
 ┌───────────────────────────────────────┐            ┌───────────────────────────────────────────────────────────┐
 │ DeepSeek Harness + dsh-code           │  docker    │  session A ┌───────────────────────┐                      │
 │  • chat, model, approvals, history    │  exec ───▶ │            │ gVisor kernel (runsc) │  checkout + branch   │
-│  • GitHub token (gh), never shipped   │            │            │ uid 1000, no caps,    │  dsh-code/3f9a…      │
+│  • GitHub token (gh), never shipped   │            │            │ non-root, no caps,    │  dsh-code/3f9a…      │
 │  • bare Git mirror per session ◀──────┼─ bundles ──┤            │ read-only root        │                      │
 │      clone ▶ / ◀ push                 │            │            └──────────┬────────────┘                      │
 │  • Preview tab ◀── docker exec relay ─┼────────────┤  session B ┌──────────┴────────────┐  internal network,   │
@@ -81,14 +81,15 @@ The web app the agent starts, found by the port it listens on. It is reached thr
 
 ## Verified by tests
 
-Unit tests (127) cover the policy, proxy, settings, container spec, remote settings and key pinning, the approval tool and the preset file. The live suites create real gVisor containers and check, among others:
+Unit tests (141) cover the policy, proxy, settings, container spec, remote settings and key pinning, the network helpers and Tailscale join, the approval tool and the preset file. The live suites create real gVisor containers and check, among others:
 
-- the container kernel is gVisor, the user is uid 1000, capabilities are all zero, the root filesystem is read-only, and there is no Docker socket;
+- the container kernel is gVisor, the user is not root (your own user id, or 1000 when Harness runs as root), capabilities are all zero, the root filesystem is read-only, and there is no Docker socket;
 - direct egress is blocked, unlisted hosts and the metadata address get 403, a tightened policy refuses a destination at once, and a host approved for one session is refused to another;
 - 1,000 reads through the file helper while sandbox code swaps a symlink between a workspace file and a host file never return the host file;
 - a `pre-push` hook and a `core.fsmonitor` command planted in the checkout do not run on the host when it pushes;
 - real exit codes, whole process groups stopped, an offline container reported as such, and cleanup after restart (containers, checkouts, mirrors, volumes);
 - on macOS, the non-root sandbox user writes, commits and pushes from a volume checkout;
+- in the running app, with a scripted model: a Code session on a volume checkout on the remote VM runs the agent's command in gVisor as a non-root user in its own branch, and `request_network_access` shows the Harness approval card; after Allow once, the approved host answers and an unapproved one still gets 403;
 - over SSH to a remote Docker host (run against a local VM's SSH server, not yet against Azure or AWS): the host key pin (a wrong fingerprint is refused), provisioning on the VM, the file helper and Preview relay through SSH, 30 parallel commands over one connection, a host change never reusing the old connection, an unreachable VM at startup keeping local records, a worker image build, egress filtering and a session grant on the VM, and a push from this computer;
 - cleanup removes only its own orphans: a checkout volume of another installation on the same Docker host is left alone.
 
@@ -150,6 +151,16 @@ Use **Settings > Code**, or override the `code-workspaces` row in the profile's 
     remoteUser: ''
     remoteIdentityFile: ''          # private key file on this computer
     remoteHostKey: ''               # the VM's SHA256 host key fingerprint
+    remoteVia: direct               # direct | aws-ssm | azure-bastion
+    remoteNetwork: public           # public | private (Tailscale or WireGuard address)
+    remotePublicHost: ''            # private network: the VM's public address, to check public SSH is closed
+    remoteAwsInstanceId: ''         # Session Manager: i-…
+    remoteAwsRegion: ''
+    remoteAwsProfile: ''
+    remoteAzureBastion: ''          # Bastion: name, resource group, VM resource ID, subscription
+    remoteAzureResourceGroup: ''
+    remoteAzureVmId: ''
+    remoteAzureSubscription: ''
 ```
 
 Settings > Code edits everything above except `dataDir`. Changes apply without restarting Harness; changing the remote host reloads Code with it. `/tmp` size and image changes reach a workspace when it restarts. `dataDir` defaults to `~/.dsh-code`, or `/var/lib/dsh-code` when Harness runs as root.

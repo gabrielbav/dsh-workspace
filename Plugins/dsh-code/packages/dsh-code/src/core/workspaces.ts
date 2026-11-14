@@ -18,7 +18,7 @@ import type { RepositoryRef, SelfTestCheck, SelfTestReport, WorkspaceStatus, Wor
 
 export type { SelfTestReport, WorkspaceStatus } from '../types.ts'
 import type { EgressPolicy } from '../egress/policy.ts'
-import { closeConnection, pinHostKey, PREPARE_SCRIPT, remoteShell, RemoteError, type RemoteHost } from './remote.ts'
+import { closeConnection, pinHostKey, PREPARE_SCRIPT, remoteShell, RemoteError, stopBastionTunnel, type RemoteHost } from './remote.ts'
 import { isPrivateAddress, isTailscaleAddress, localTailscaleAddresses, parseSshClient, probeTcp, type RemoteNetwork } from './network-path.ts'
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
@@ -330,6 +330,8 @@ export class WorkspaceManager {
     }
     const login = await remoteShell(remote.dir, 'uname -sm')
     if (login.code !== 0) {
+      // The next attempt opens a fresh Bastion tunnel instead of reusing a dead one.
+      if (remote.host.via?.kind === 'azure-bastion') stopBastionTunnel(remote.dir)
       // Over a tailnet, the usual cause is this computer not being on it.
       const offTailnet = remote.network === 'private' && isTailscaleAddress(remote.host.host) && localTailscaleAddresses().length === 0
       return { id: 'remote', ok: false, detail: `SSH login to the remote VM failed: ${login.stderr.trim().split('\n').slice(-1)[0] ?? 'no output'}`, remedy: offTailnet ? SETUP_REMEDIES.tailnet : SETUP_REMEDIES.remote }

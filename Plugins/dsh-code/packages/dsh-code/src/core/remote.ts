@@ -274,10 +274,25 @@ export async function fingerprints(lines: readonly string[], sshKeygen = 'ssh-ke
  * @param remote - validated settings.
  * @param tools - ssh-keyscan and ssh-keygen binaries.
  */
-export async function pinHostKey(dir: string, remote: RemoteHost, tools: { readonly sshKeyscan?: string; readonly sshKeygen?: string } = {}): Promise<void> {
+export function pinHostKey(dir: string, remote: RemoteHost, tools: { readonly sshKeyscan?: string; readonly sshKeygen?: string } = {}): Promise<void> {
+  // Startup and a session's setup check can pin at the same time; they share one attempt, so a failing one never
+  // clears a pin the other just wrote.
+  const running = pinning.get(dir)
+  if (running !== undefined) return running
+  const attempt = pinOnce(dir, remote, tools).finally(() => { pinning.delete(dir) })
+  pinning.set(dir, attempt)
+  return attempt
+}
+
+/** The pin in progress for each remote folder. */
+const pinning = new Map<string, Promise<void>>()
+
+async function pinOnce(dir: string, remote: RemoteHost, tools: { readonly sshKeyscan?: string; readonly sshKeygen?: string }): Promise<void> {
   try {
     await pin(dir, remote, tools)
   } catch (error) {
+    // A Bastion tunnel that is listening but dead (an expired az login) would otherwise be reused forever.
+    if (remote.via?.kind === 'azure-bastion') stopBastionTunnel(dir)
     // A key pinned earlier must not outlive a failed check; the check's own error is what the user needs.
     try {
       writeFileSync(join(dir, 'known_hosts'), '', { mode: 0o600 })
@@ -312,7 +327,7 @@ async function pin(dir: string, remote: RemoteHost, tools: { readonly sshKeyscan
 async function pinThroughProxy(dir: string, remote: RemoteHost, sshKeygen?: string): Promise<void> {
   const offered: { line: string; fingerprint: string; type: string }[] = []
   for (const algorithm of ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'rsa-sha2-512']) {
-    const scratch = join(dir, `known_hosts.probe`)
+    const scratch = join(dir, `known_hosts.probe-${process.pid}-${Math.random().toString(36).slice(2)}`)
     writeFileSync(scratch, '', { mode: 0o600 })
     await run(join(dir, 'bin', 'ssh'), ['-T', '-o', `UserKnownHostsFile=${scratch}`, '-o', 'StrictHostKeyChecking=accept-new', '-o', `HostKeyAlgorithms=${algorithm}`,
       '-o', 'PreferredAuthentications=none', '-o', 'PubkeyAuthentication=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', REMOTE_ALIAS, 'true'], undefined, 90_000)

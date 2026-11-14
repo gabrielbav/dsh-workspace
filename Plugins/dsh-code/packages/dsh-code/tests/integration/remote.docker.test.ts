@@ -165,6 +165,9 @@ describe.runIf(enabled)('workspaces on a remote Docker host over SSH', () => {
       await pinHostKey(dir, remote)
       expect((await remoteShell(dir, 'echo via-bastion')).stdout.trim()).toBe('via-bastion')
       expect((await new DockerCli(processRunner(dockerVia), dockerVia).runtimes())).toContain('runsc')
+      // Startup and a setup check pinning at once must not undo each other.
+      for (let i = 0; i < 3; i++) await Promise.all([pinHostKey(dir, remote), pinHostKey(dir, remote), pinHostKey(dir, remote)])
+      expect((await remoteShell(dir, 'echo still-pinned')).stdout.trim()).toBe('still-pinned')
       await expect(pinHostKey(dir, { ...remote, hostKey: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' })).rejects.toMatchObject({ field: 'hostKey' })
     } finally {
       tunnel.close()

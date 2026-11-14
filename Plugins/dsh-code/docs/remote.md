@@ -166,7 +166,7 @@ az network bastion create -g dsh-code -n dsh-code-bastion --vnet-name dsh-code-v
 az vm show -g dsh-code -n dsh-code-vm --query id -o tsv     # the VM resource ID
 ```
 
-The network and subnet names follow what `az vm create` makes by default (`<vm>VNET`); check yours with `az network vnet list -g dsh-code -o table`. To create the VM without a public IP, add `--public-ip-address ""` to `az vm create`.
+Check these flags with `az network bastion create --help` before running them: they follow Azure's Bastion documentation but have not been run here. The network and subnet names follow what `az vm create` makes by default (`<vm>VNET`); check yours with `az network vnet list -g dsh-code -o table`. To create the VM without a public IP, add `--public-ip-address ""` to `az vm create`.
 
 On this computer: the Azure CLI, logged in (`az login`). If it says the Bastion commands need an extension, install it with `az extension add --name bastion`.
 
