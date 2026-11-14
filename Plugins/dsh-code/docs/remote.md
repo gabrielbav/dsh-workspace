@@ -88,6 +88,50 @@ Delete everything afterwards: `aws ec2 terminate-instances --instance-ids "$ID"`
 
 To confirm it worked, open the session's **Environment** tab: it shows **Runs on: remote VM** and **Checkout: Docker volume**, and the provisioning timeline lists **Creating the checkout volume and importing the branch**. Ask the agent to run `dmesg | head -n 1` (prints `Starting gVisor…`) and `id -u` (prints `1000`).
 
+## Restrict SSH to this dsh (optional)
+
+Settings > Code > Remote Docker host > **Restrict SSH to this dsh**:
+
+- **Ask the VM** shows the address the VM sees for this dsh (`$SSH_CLIENT` on the VM). It is the right one behind a home router, a VPN or a VPS provider's network.
+- **Detect with checkip.amazonaws.com** asks that public service instead, before the first connection works. It runs only when you click it, and it tells that service this computer's address (which every server dsh connects to sees anyway).
+
+Both show copy-ready Azure and AWS commands that allow only that address; put your own names in place of `<…>`. On AWS, a rule only adds access, so the commands also remove the open-to-everyone rules. The address is shown only in Settings, never to the agent or in logs.
+
+Keep in mind: home and office addresses can change (SSH then stops answering until you update the rule; the setup notice says so), and an office or VPN address may be shared with other people. The key and the pinned host key stay the real protection; the rule narrows who can try.
+
+When dsh moves to a VPS, its address is fixed: restrict SSH to the VPS's address the same way.
+
+## Private network: Tailscale or WireGuard (optional)
+
+With a private network, the VM needs no public SSH port at all. Code still uses SSH, with the same key and pinned host key, over the private address.
+
+**Tailscale**, from Settings:
+
+1. This computer (or the VPS dsh runs on) must already be on your tailnet: install Tailscale here and log in.
+2. With the remote host working over public SSH, open **Move to a private network with Tailscale** and click **Join the VM to Tailscale**. Code installs Tailscale on the VM with Tailscale's own install script (`sudo`) and runs `sudo tailscale up --ssh=false`: no auth key is used, and Tailscale SSH stays off so the VM keeps its own SSH server, key and host key.
+3. Approve the VM with the link that appears (it is for you only: whoever opens it can add the VM to their tailnet).
+4. Click **Use this address**: Host becomes the VM's `100.x.y.z` address, Network path becomes Private network, and the public address is kept for a check. Save.
+5. When the setup notice shows the login over the private address works, **Restrict SSH** shows the commands to close public SSH. With the public address filled in, the setup notice warns while public SSH still answers from this computer (it cannot tell whether it answers for others).
+
+Sessions keep working across the move: a remote session belongs to the VM's host key, not its address.
+
+Limit what the VM can reach in your tailnet. A tailnet connects in both directions, so by default the VM could reach your other devices. Tag the VM in the Tailscale admin console (Machines > the VM > Edit ACL tags) and allow only you to reach it on SSH, for example:
+
+```json
+{
+  "tagOwners": { "tag:dsh-code-vm": ["autogroup:admin"] },
+  "grants": [
+    { "src": ["you@example.com"], "dst": ["tag:dsh-code-vm"], "ip": ["tcp:22"] }
+  ]
+}
+```
+
+Grants are additive and the policy denies by default, so remove any broader rule (such as the default allow-all) for this to take effect, and add none that lets `tag:dsh-code-vm` reach other devices. (The sandboxes themselves cannot reach the tailnet: the egress proxy refuses Tailscale's whole range.)
+
+Do not lock yourself out: Tailscale node keys expire. Disable key expiry for the VM in the admin console, and keep another way in before closing public SSH (the cloud's serial console, Azure Bastion, or AWS Session Manager).
+
+**WireGuard:** set it up on both ends yourself (it needs root on this computer, which Code does not have), then choose **Private network** and enter the VM's WireGuard address as Host. Code checks that the address is private and that the login works over it.
+
 ## Switching back
 
 Clear **Host** in Settings > Code to run on your computer again. Sessions started on the VM stay there and show as offline; they work again when you switch back. Deleting such a session while Code uses your computer removes its record and mirror here; its container and volume on the VM are removed the next time Code starts with that VM.

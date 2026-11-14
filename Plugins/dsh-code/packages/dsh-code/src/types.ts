@@ -171,6 +171,26 @@ export interface CodeSettings {
   readonly remoteIdentityFile: string
   /** The VM's SHA256 host key fingerprint. */
   readonly remoteHostKey: string
+  /** `public`: SSH to the VM's internet address; `private`: over Tailscale or WireGuard. */
+  readonly remoteNetwork: 'public' | 'private'
+  /** With a private network, the VM's public address, checked from here to be unreachable; optional. */
+  readonly remotePublicHost: string
+}
+
+/** Where joining the remote VM to Tailscale stands. */
+export interface TailscaleJoinView {
+  readonly state: 'idle' | 'installing' | 'waiting-for-login' | 'joined' | 'failed'
+  readonly loginUrl?: string
+  readonly address?: string
+  readonly error?: string
+}
+
+/** Copy-ready firewall commands, for Settings > Code > Restrict SSH. */
+export interface FirewallView {
+  readonly address: string
+  readonly allowOnly: { readonly azure: readonly string[]; readonly aws: readonly string[] }
+  /** Present only after a login over the private network passed. */
+  readonly closePublic?: { readonly azure: readonly string[]; readonly aws: readonly string[] }
 }
 
 /** Settings plus whether they can be saved to the profile. */
@@ -179,6 +199,8 @@ export interface CodeSettingsView {
   readonly writable: boolean
   /** The save changed the Docker host, so Code reloaded with it. */
   readonly reloaded?: boolean
+  /** The last setup check logged in to the VM over a private network address. */
+  readonly privateLoginOk?: boolean
 }
 
 /** One account the host's gh CLI is signed in with, for Settings > Code. */

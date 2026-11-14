@@ -11,7 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ComponentType } from 'react'
 import remote from '@gabrielbav/dsh-code/remote'
-import type { AccountRepositories, BrowserAction, GhAccount, IsolatedFrame, PreviewTargets, SessionOverrides, SessionOverridesView, SessionVariables, CodeSessionView, CodeSettings, CodeSettingsView, RepositorySummary, BranchList, PendingWork, SelfTestReport, PushResult, SessionEnvironment, WorkspaceUsage } from '../types.ts'
+import type { AccountRepositories, BrowserAction, FirewallView, TailscaleJoinView, GhAccount, IsolatedFrame, PreviewTargets, SessionOverrides, SessionOverridesView, SessionVariables, CodeSessionView, CodeSettings, CodeSettingsView, RepositorySummary, BranchList, PendingWork, SelfTestReport, PushResult, SessionEnvironment, WorkspaceUsage } from '../types.ts'
 import { IconBranchOutlineRegular, IconFolderOpenOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { CodeSettingsSection, EnvironmentTab, PreviewTab, SelectionLabel, SessionActions, SetupNotice, WorkspaceStatusLine, type Outcome } from './components.tsx'
 import { cell, sameIds, type Cell } from './store.ts'
@@ -52,6 +52,10 @@ interface CodeRemote {
   deleteWorkspace(sessionId: string): Promise<Result<void>>
   buildWorker(): Promise<Result<SelfTestReport>>
   prepareRemote(): Promise<Result<SelfTestReport>>
+  remoteAddress(): Promise<Result<FirewallView>>
+  detectAddress(): Promise<Result<FirewallView>>
+  tailscaleJoin(): Promise<Result<TailscaleJoinView>>
+  tailscaleStatus(): Promise<Result<TailscaleJoinView>>
   usage(sessionId: string): Promise<Result<WorkspaceUsage | null>>
   previewUrl(sessionId: string, port: number): Promise<Result<string>>
   settings(): Promise<Result<CodeSettingsView>>
@@ -380,6 +384,10 @@ function register(ctx: Context): void {
         }
       },
       save: async (settings: CodeSettings) => outcome(await api().updateSettings(settings)),
+      remoteAddress: async () => outcome(await api().remoteAddress()),
+      detectAddress: async () => outcome(await api().detectAddress()),
+      tailscaleJoin: async () => outcome(await api().tailscaleJoin()),
+      tailscaleStatus: async () => outcome(await api().tailscaleStatus()),
     }),
   }, CodeSettingsSection as ComponentType<never>))
 }

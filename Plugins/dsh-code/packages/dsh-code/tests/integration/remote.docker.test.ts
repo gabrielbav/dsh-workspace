@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { request } from 'node:http'
+import { connect, createServer, type AddressInfo } from 'node:net'
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -75,7 +76,7 @@ describe.runIf(enabled)('workspaces on a remote Docker host over SSH', () => {
 
   it('provisions on the VM: gVisor, non-root, checkout imported from a bundle, nothing of it on this computer', async () => {
     w = await manager.provision('remote-a', repo, 'main')
-    expect(w).toMatchObject({ storage: 'volume', backend: `ssh://${host!.user}@${host!.host}:${host!.port}` })
+    expect(w).toMatchObject({ storage: 'volume', backend: `ssh-key:${host!.hostKey}` })
     expect(await manager.runInside(w, ['sh', '-c', 'dmesg | head -n 1'])).toMatch(/gVisor/)
     expect(await manager.runInside(w, ['id', '-u'])).toBe('1000')
     expect(await manager.runInside(w, ['cat', 'README.md'])).toBe('# remote seed')
@@ -110,6 +111,42 @@ describe.runIf(enabled)('workspaces on a remote Docker host over SSH', () => {
     await new Promise(r => setTimeout(r, 2500))
     expect(await manager.runInside(w, ['sh', '-c', 'curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://example.org/'])).toBe('403')
   }, 120_000)
+
+  it('keeps the sessions of a VM reached at another address (same host key)', async () => {
+    // The same VM through a local forwarder (another address and port): what a tunnel or its Tailscale address looks like.
+    const forwarder = createServer((client) => {
+      const upstream = connect(host!.port, host!.host)
+      client.pipe(upstream).pipe(client)
+      client.on('error', () => upstream.destroy())
+      upstream.on('error', () => client.destroy())
+    })
+    await new Promise<void>(r => forwarder.listen(0, '127.0.0.1', r))
+    const otherDir = join(root, 'alias')
+    const alias = { ...host!, host: '127.0.0.1', port: (forwarder.address() as AddressInfo).port }
+    const again = new WorkspaceManager({ ...manager.config, remote: { host: alias, dir: otherDir, dockerBinary: writeRemoteFiles(otherDir, alias, { ssh: which('ssh'), docker: which('docker') }) } },
+      new DockerCli(processRunner(join(otherDir, 'docker')), join(otherDir, 'docker')))
+    try {
+      await again.reconcile()
+      expect(again.get('remote-a')?.status).toBe('ready')
+      expect(await again.runInside(again.get('remote-a')!, ['cat', 'README.md'])).toBe('# remote seed')
+    } finally {
+      forwarder.close()
+    }
+  }, 120_000)
+
+  it('reports the address the VM sees for this dsh', async () => {
+    expect(await manager.remoteClientAddress()).toMatch(/^[0-9a-f.:]+$/i)
+  }, 60_000)
+
+  it('in private network mode, refuses a host that is not a private address and flags public SSH that still answers', async () => {
+    const otherDir = join(root, 'private')
+    const priv = new WorkspaceManager({ ...manager.config, remote: { host: host!, dir: otherDir, dockerBinary: writeRemoteFiles(otherDir, host!, { ssh: which('ssh'), docker: which('docker') }), network: 'private', publicHost: host!.host } })
+    const report = await priv.selfTest()
+    expect(report.ok).toBe(false)
+    expect(report.checks.find(c => c.id === 'remote')).toMatchObject({ ok: true })
+    expect(report.checks.find(c => c.id === 'private-network')).toMatchObject({ ok: false })
+    expect(report.checks.find(c => c.id === 'public-ssh')).toMatchObject({ ok: true, warning: true })
+  }, 60_000)
 
   it('runs 30 commands in parallel through one SSH connection', async () => {
     const outputs = await Promise.all(Array.from({ length: 30 }, (_, i) => manager.runInside(w, ['sh', '-c', `echo ${i}`])))

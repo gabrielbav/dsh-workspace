@@ -77,6 +77,7 @@ The web app the agent starts, found by the port it listens on. It is reached thr
 - **Linux:** the checkout is a folder under the data folder.
 - **macOS with Colima:** gVisor shows folders shared from the Mac as owned by root, so the sandbox user cannot write them. Code detects this at setup and keeps the checkout in a Docker volume inside the VM instead, still as the non-root user. **Settings > Code > Checkout storage** can force either.
 - **Your own VM (Azure, AWS, any SSH host):** give the host, login, key file and the VM's host key fingerprint. Code drives Docker there over SSH with its own config (pinned host key, one key file, no prompts, no forwarding) and never touches `~/.ssh`. **Prepare the VM** installs Docker and gVisor with `sudo`. Your GitHub token and the Git mirror stay on your computer; the agent's traffic leaves from the VM.
+- **Locking the VM down, all optional:** restrict its SSH port to this dsh (Code shows the address the VM sees and copy-ready Azure and AWS commands), or move it to a private network: Code can join the VM to your Tailscale tailnet (you approve it in your browser; no auth key, Tailscale SSH stays off), and WireGuard works with an address you set up. Sessions follow the VM across addresses, because they belong to its host key.
 
 ## Verified by tests
 
@@ -177,7 +178,7 @@ The `code` preset leaves out tools that would act from the host on the agent's b
 
 - **Previews** need `dsh web` (the desktop app has no web server) and proxy plain HTTP only: no WebSocket, so no dev-server hot reload. Apps work best with relative asset paths.
 - **Volume checkouts** (macOS, remote VMs) are not visible in Finder or in the Harness file tree, and deleting the Docker VM loses work that was not pushed.
-- **On a remote VM**, extra read-only folders are skipped (they are on your computer). **Prepare the VM** has been run against a VM that already had Docker and gVisor, not yet against a fresh Azure or AWS VM; its Amazon Linux and Fedora path (gVisor's release tarball) has not run at all.
+- **On a remote VM**, extra read-only folders are skipped (they are on your computer). **Join the VM to Tailscale** has been tested against a stand-in for the VM, not against a real tailnet. **Prepare the VM** has been run against a VM that already had Docker and gVisor, not yet against a fresh Azure or AWS VM; its Amazon Linux and Fedora path (gVisor's release tarball) has not run at all.
 - **Windows (WSL2)** is untested.
 - **Host-configured MCP servers** run on the host as before; repository-defined MCP servers are not started for Code sessions.
 - **Choices before the first message** (repository, branch, account) live in memory until the workspace starts.

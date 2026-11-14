@@ -22,13 +22,15 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import { WorkspaceError, WorkspaceManager, type WorkspaceManagerConfig, type WorkspaceRecord } from '../core/workspaces.ts'
 import { EnvironmentError, environmentLines, parseEnvironment } from '../core/environment.ts'
 import { GitHubProvider, SourceControlError } from '../core/github.ts'
-import type { AccountRepositories, BranchList, BrowserAction, GhAccount, IsolatedFrame, PreviewTargets, ProvisionStep, SessionOverrides, SessionOverridesView, SessionVariables, CodeSessionView, CodeSettings, CodeSettingsView, PendingWork, PushResult, RepositorySummary, SelfTestReport, SessionEnvironment, WorkspaceUsage } from '../types.ts'
+import type { FirewallView, TailscaleJoinView, AccountRepositories, BranchList, BrowserAction, GhAccount, IsolatedFrame, PreviewTargets, ProvisionStep, SessionOverrides, SessionOverridesView, SessionVariables, CodeSessionView, CodeSettings, CodeSettingsView, PendingWork, PushResult, RepositorySummary, SelfTestReport, SessionEnvironment, WorkspaceUsage } from '../types.ts'
 import { onlySettingsChanged, REMOTE_FIELDS, SETTINGS_FIELDS, SettingsError, validateSettings } from '../core/settings.ts'
 import { PREVIEW_PREFIX, PreviewProxy, relayConnection } from './preview.ts'
 import { IsolatedBrowsers } from './browser.ts'
 import { Git, gitRunner } from '../core/git.ts'
 import { DockerCli, processRunner } from '../core/docker.ts'
-import { RemoteError as RemoteSettingsError, validateRemote, writeRemoteFiles } from '../core/remote.ts'
+import { REMOTE_ALIAS, RemoteError as RemoteSettingsError, validateRemote, writeRemoteFiles } from '../core/remote.ts'
+import { allowOnlyCommands, closePublicCommands, detectPublicAddress } from '../core/network-path.ts'
+import { TailscaleJoin } from '../core/tailscale.ts'
 import { DEFAULT_ALLOW, type EgressMode } from '../egress/policy.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -70,6 +72,9 @@ export interface Config {
   remoteUser: string
   remoteIdentityFile: string
   remoteHostKey: string
+  remoteNetwork: 'public' | 'private'
+  remotePublicHost: string
+  addressEchoUrl: string
   defaultAccount: string
   disabledAccounts: string[]
   newBranch: boolean
@@ -116,6 +121,9 @@ export const Config: z<Config> = z.object({
   remoteUser: z.string().default('').description('SSH login on the remote Docker host; it needs Docker access there'),
   remoteIdentityFile: z.string().default('').description('Private key file on this computer for the remote Docker host'),
   remoteHostKey: z.string().default('').description('SHA256 host key fingerprint of the remote Docker host; any other key is refused'),
+  remoteNetwork: z.union(['public', 'private'] as const).default('public').description('public: SSH to the VM\'s internet address; private: over Tailscale or WireGuard'),
+  remotePublicHost: z.string().default('').description('With a private network: the VM\'s public address, checked from here to be unreachable'),
+  addressEchoUrl: z.string().default('https://checkip.amazonaws.com').description('Service Detect asks for this computer\'s internet address (only when the user clicks Detect)'),
   storage: z.union(['auto', 'bind', 'volume'] as const).default('auto').description('Where new checkouts live: auto picks a host folder when the sandbox user can write one, else a Docker volume'),
   newBranch: z.boolean().default(true).description('Give each Code session its own dsh-code/<hash> branch; false works on the chosen branch'),
   defaultAccount: z.string().default('').description('GitHub account (gh login) new Code sessions use; empty uses the gh CLI active account'),
@@ -173,6 +181,7 @@ function settingsOf(config: Config): CodeSettings {
     previewEnabled: config.previewEnabled, isolatedBrowser: config.isolatedBrowser, storage: config.storage,
     remoteHost: config.remoteHost, remotePort: config.remotePort, remoteUser: config.remoteUser,
     remoteIdentityFile: config.remoteIdentityFile, remoteHostKey: config.remoteHostKey,
+    remoteNetwork: config.remoteNetwork, remotePublicHost: config.remotePublicHost,
   }
 }
 
@@ -186,7 +195,7 @@ function remoteOf(config: Config, dataDir: string): Pick<WorkspaceManagerConfig,
     const host = validateRemote({ host: config.remoteHost, port: config.remotePort, user: config.remoteUser, identityFile: config.remoteIdentityFile, hostKey: config.remoteHostKey })
     const which = (name: string): string => execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim()
     const dir = join(dataDir, 'remote')
-    return { remote: { host, dir, dockerBinary: writeRemoteFiles(dir, host, { ssh: which('ssh'), docker: which('docker') }) } }
+    return { remote: { host, dir, dockerBinary: writeRemoteFiles(dir, host, { ssh: which('ssh'), docker: which('docker') }), network: config.remoteNetwork, publicHost: config.remotePublicHost.trim() } }
   } catch (error) {
     return { remoteError: error instanceof RemoteSettingsError ? `${error.field}: ${error.message}` : `the remote Docker host cannot be used: ${String(error)}` }
   }
@@ -259,6 +268,8 @@ export class CodeWorkspacesService extends TypertRemoteService {
       if (server === undefined) return
       scoped.effect(() => server.register({ kind: 'prefix', path: PREVIEW_PREFIX, handler: (req, res) => this.previews.handle(req, res) }), 'dsh-code: preview route')
     })
+    // A Tailscale join waiting for the user's approval ends with this service.
+    ctx.effect(() => () => { if (this.tailscale.status().state === 'installing' || this.tailscale.status().state === 'waiting-for-login') this.tailscale.stop('Code reloaded; start the join again') }, 'dsh-code: stop a Tailscale join')
     ctx.effect(() => {
       const lifetime = new AbortController()
       void this.manager.reconcile().catch((error: unknown) => { ctx.logger('dsh-code').warn('reconcile failed: %s', String(error)) })
@@ -533,7 +544,79 @@ export class CodeWorkspacesService extends TypertRemoteService {
    */
   @Remote
   async settings(): Promise<CodeSettingsView> {
-    return { settings: settingsOf(this.config), writable: this.ctx.get('configEditor' as never) !== undefined && this.entry !== undefined }
+    return {
+      settings: settingsOf(this.config), writable: this.ctx.get('configEditor' as never) !== undefined && this.entry !== undefined,
+      ...await this.privateLoginOk() ? { privateLoginOk: true } : {},
+    }
+  }
+
+  /** Whether the last setup check logged in over a private network address (then closing public SSH is safe to show). */
+  private async privateLoginOk(): Promise<boolean> {
+    if (this.manager.config.remote?.network !== 'private' || this.selfTestReport === undefined) return false
+    const report = await this.selfTestReport.catch(() => undefined)
+    return report?.checks.some(c => c.id === 'remote' && c.ok) === true && report.checks.some(c => c.id === 'private-network' && c.ok)
+  }
+
+  /**
+   * The address the remote VM sees for this dsh, and firewall commands that allow only it. Shown in Settings only.
+   * @returns the address and commands.
+   */
+  @Remote
+  async remoteAddress(): Promise<FirewallView> {
+    let address: string
+    try {
+      address = await this.manager.remoteClientAddress()
+    } catch (error) {
+      throw remoteFailure(error)
+    }
+    return this.firewallView(address)
+  }
+
+  /**
+   * This computer's internet address from a public echo service, on the user's click only.
+   * @returns the address and commands.
+   */
+  @Remote
+  async detectAddress(): Promise<FirewallView> {
+    let address: string
+    try {
+      address = await detectPublicAddress(this.config.addressEchoUrl)
+    } catch (error) {
+      throw new RemoteError('code/failed', `Could not detect this computer's address: ${error instanceof Error ? error.message : String(error)}`, { reason: 'detect-failed' })
+    }
+    return this.firewallView(address)
+  }
+
+  private async firewallView(address: string): Promise<FirewallView> {
+    const port = this.manager.config.remote?.host.port ?? 22
+    return { address, allowOnly: allowOnlyCommands(address, port), ...await this.privateLoginOk() ? { closePublic: closePublicCommands(port) } : {} }
+  }
+
+  private readonly tailscale = new TailscaleJoin(() => {
+    const dir = this.manager.config.remote?.dir
+    if (dir === undefined) throw new WorkspaceError('not-found', 'no remote Docker host is configured')
+    return [join(dir, 'bin', 'ssh'), '-T', REMOTE_ALIAS, 'sh -s']
+  })
+
+  /**
+   * Join the remote VM to Tailscale (installs it there when missing, then `tailscale up` without an auth key or
+   * Tailscale SSH); the login link appears in the status.
+   * @returns the join state.
+   */
+  @Remote
+  async tailscaleJoin(): Promise<TailscaleJoinView> {
+    if (this.manager.config.remote === undefined) throw new RemoteError('code/failed', 'Set a remote Docker host first', { reason: 'no-remote' })
+    try {
+      return this.tailscale.start()
+    } catch (error) {
+      throw remoteFailure(error)
+    }
+  }
+
+  /** @returns where joining the VM to Tailscale stands. */
+  @Remote
+  async tailscaleStatus(): Promise<TailscaleJoinView> {
+    return this.tailscale.status()
   }
 
   /**

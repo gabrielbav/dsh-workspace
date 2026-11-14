@@ -36,6 +36,14 @@ describe('egress policy', () => {
     for (const a of ['140.82.112.3', '104.16.0.1', '::ffff:140.82.112.3']) expect(isBlockedAddress(a), a).toBe(false)
   })
 
+  it('refuses the whole Tailscale range (CGNAT 100.64.0.0/10 and fd7a:115c:a1e0::/48), so a VM on a tailnet cannot reach its peers', () => {
+    for (const a of ['100.64.0.1', '100.100.100.100', '100.101.102.103', '100.127.255.254', 'fd7a:115c:a1e0::1', 'fd7a:115c:a1e0:ab12:4843:cd96:6258:b240']) {
+      expect(isBlockedAddress(a), a).toBe(true)
+      expect(decideAddress(policy, 'github.com', 443, a).allowed, a).toBe(false)
+    }
+    expect(decideRequest(policy, '100.101.102.103', 22).allowed).toBe(false)
+  })
+
   it('blocks DNS rebinding to private ranges unless explicitly approved', () => {
     expect(decideAddress(policy, 'github.com', 443, '10.0.0.5').allowed).toBe(false)
     expect(decideAddress({ ...policy, privateAllow: ['git.internal:443'] }, 'git.internal', 443, '10.0.0.5').allowed).toBe(true)

@@ -19,6 +19,9 @@ import type { RepositoryRef, SelfTestCheck, SelfTestReport, WorkspaceStatus, Wor
 export type { SelfTestReport, WorkspaceStatus } from '../types.ts'
 import type { EgressPolicy } from '../egress/policy.ts'
 import { closeConnection, pinHostKey, PREPARE_SCRIPT, remoteShell, RemoteError, type RemoteHost } from './remote.ts'
+import { isPrivateAddress, isTailscaleAddress, localTailscaleAddresses, parseSshClient, probeTcp, type RemoteNetwork } from './network-path.ts'
+import { lookup } from 'node:dns/promises'
+import { isIP } from 'node:net'
 
 /** Durable workspace record, stored as JSON in the data directory. */
 export interface WorkspaceRecord {
@@ -36,7 +39,7 @@ export interface WorkspaceRecord {
   readonly storage?: CheckoutStorage
   /** The checkout's Docker volume when {@link storage} is `volume`. */
   readonly volume?: string
-  /** The Docker host the workspace lives on: `local`, or `ssh://user@host:port`; absent means `local`. */
+  /** The Docker host the workspace lives on: `local`, or `ssh-key:<SHA256 host key>` for a remote VM; absent means `local`. */
   readonly backend?: string
   readonly path: string
   readonly mirrorPath: string
@@ -134,7 +137,15 @@ export interface WorkspaceManagerConfig {
    * ({@link writeRemoteFiles}); `dir` holds Code's SSH config and pinned host key. Checkouts are then always volumes,
    * extra read-only folders are skipped (they are on this computer), and the proxy's code and policy live in volumes.
    */
-  readonly remote?: { readonly host: RemoteHost; readonly dir: string; readonly dockerBinary: string }
+  readonly remote?: {
+    readonly host: RemoteHost
+    readonly dir: string
+    readonly dockerBinary: string
+    /** `private`: the host is a Tailscale or WireGuard address and public SSH should be closed. */
+    readonly network?: RemoteNetwork
+    /** The VM's public address, checked from here to be unreachable when `network` is `private`. */
+    readonly publicHost?: string
+  }
   /** Remote settings that could not be used: the self test reports it and no new workspace starts anywhere. */
   readonly remoteError?: string
   /** Whether the Harness sandbox mode of a session is read-only (its permission selector); read at container creation. */
@@ -229,10 +240,14 @@ export class WorkspaceManager {
   private get proxySourceDir(): string { return join(this.config.dataDir, 'proxy') }
   /** The `docker` to spawn for workspace processes: the remote wrapper, or `docker`. */
   get dockerBinary(): string { return this.config.remote?.dockerBinary ?? 'docker' }
-  /** Which Docker host this manager drives; records of another one are left alone. */
+  /**
+   * Which Docker host this manager drives; records of another one are left alone. A remote VM is named by its
+   * pinned host key, not its address, so reaching the same VM another way (its Tailscale address, a tunnel, a new
+   * public IP) keeps its sessions.
+   */
   get backend(): string {
     const remote = this.config.remote?.host
-    return remote === undefined ? 'local' : `ssh://${remote.user}@${remote.host}:${remote.port}`
+    return remote === undefined ? 'local' : `ssh-key:${remote.hostKey}`
   }
   private onOtherBackend(record: WorkspaceRecord): boolean { return (record.backend ?? 'local') !== this.backend }
   private get proxyCodeVolume(): string { return `${this.namespace}-proxy-code` }
@@ -250,6 +265,9 @@ export class WorkspaceManager {
       const connection = await this.checkRemote()
       checks.push(connection)
       if (!connection.ok) return { ok: false, checks }
+      const network = await this.privateNetworkChecks()
+      checks.push(...network)
+      if (network.some(c => !c.ok)) return { ok: false, checks }
     }
     const runtimes = await this.docker.runtimes()
     checks.push(runtimes.length > 0
@@ -311,8 +329,50 @@ export class WorkspaceManager {
       return { id: 'remote', ok: false, detail: error instanceof Error ? error.message : String(error), remedy: SETUP_REMEDIES.remote }
     }
     const login = await remoteShell(remote.dir, 'uname -sm')
-    if (login.code !== 0) return { id: 'remote', ok: false, detail: `SSH login to the remote VM failed: ${login.stderr.trim().split('\n').slice(-1)[0] ?? 'no output'}`, remedy: SETUP_REMEDIES.remote }
+    if (login.code !== 0) {
+      // Over a tailnet, the usual cause is this computer not being on it.
+      const offTailnet = remote.network === 'private' && isTailscaleAddress(remote.host.host) && localTailscaleAddresses().length === 0
+      return { id: 'remote', ok: false, detail: `SSH login to the remote VM failed: ${login.stderr.trim().split('\n').slice(-1)[0] ?? 'no output'}`, remedy: offTailnet ? SETUP_REMEDIES.tailnet : SETUP_REMEDIES.remote }
+    }
     return { id: 'remote', ok: true, detail: `remote VM reachable over SSH, host key pinned (${login.stdout.trim()})` }
+  }
+
+  /**
+   * Private network checks after a successful login: the host must be a private address, and the VM's public SSH
+   * should not answer from here. "Not reachable from this computer" is all Code can tell; a firewall may still let
+   * others in, so the check never says "closed".
+   * @returns the checks, empty in public mode.
+   */
+  private async privateNetworkChecks(): Promise<SelfTestCheck[]> {
+    const remote = this.config.remote
+    if (remote?.network !== 'private') return []
+    const checks: SelfTestCheck[] = []
+    const host = remote.host.host
+    const addresses = isIP(host) !== 0 ? [host] : (await lookup(host, { all: true }).catch(() => [])).map(a => a.address)
+    checks.push(addresses.length > 0 && addresses.every(isPrivateAddress)
+      ? { id: 'private-network', ok: true, detail: 'the VM is reached at a private network address' }
+      : { id: 'private-network', ok: false, detail: 'Private network is chosen, but the host is not a private address', remedy: SETUP_REMEDIES.privateHost })
+    if (remote.publicHost !== undefined && remote.publicHost !== '') {
+      const open = await probeTcp(remote.publicHost, remote.host.port)
+      checks.push(open
+        ? { id: 'public-ssh', ok: true, warning: true, detail: 'the VM\'s public SSH port still answers from this computer', remedy: SETUP_REMEDIES.closePublic }
+        : { id: 'public-ssh', ok: true, detail: 'the VM\'s public SSH port does not answer from this computer (a firewall may still let others in)' })
+    }
+    return checks
+  }
+
+  /**
+   * The address the VM sees for this dsh (`$SSH_CLIENT`), for a firewall rule that allows only it.
+   * @returns the address.
+   */
+  async remoteClientAddress(): Promise<string> {
+    const remote = this.config.remote
+    if (remote === undefined) throw new WorkspaceError('not-found', 'no remote Docker host is configured')
+    await this.ensurePinned()
+    const result = await remoteShell(remote.dir, 'printf "%s\\n" "$SSH_CLIENT"')
+    const address = result.code === 0 ? parseSshClient(result.stdout) : undefined
+    if (address === undefined) throw new WorkspaceError('provision-failed', 'the VM did not report the address it sees for this computer')
+    return address
   }
 
   /**
@@ -1203,6 +1263,9 @@ export const SETUP_REMEDIES = {
   runtime: 'Install gVisor (https://gvisor.dev/docs/user_guide/install/), register it with `sudo runsc install`, then `sudo systemctl reload docker`. Code never falls back to ordinary Docker.',
   image: (image: string): string => `Build the worker image: \`docker build -t ${image} <package>/worker\` after \`pnpm run build\`, or use Build worker image.`,
   remote: 'Check Settings > Code > Remote Docker host: the address and SSH port, the login, the private key file on this computer, and the host key fingerprint of the VM (docs/remote.md shows how to read it on Azure and AWS). The VM must accept SSH from this computer.',
+  tailnet: 'This computer is not on Tailscale: install Tailscale here and log in to the same tailnet as the VM, or switch Network path back to Public SSH.',
+  privateHost: 'Use the VM\'s Tailscale (100.x.y.z) or WireGuard address as the host, or switch Network path back to Public SSH.',
+  closePublic: 'Close public SSH in the VM\'s firewall: Settings > Code > Remote Docker host > Restrict SSH shows the commands for Azure and AWS. Keep a way back in first (the cloud console\'s serial console, Azure Bastion or AWS Session Manager): if Tailscale or WireGuard stops, public SSH was the way in.',
   remotePrepare: 'Use Prepare the VM: Code logs in over SSH and installs Docker and gVisor with sudo (Ubuntu, Debian, Amazon Linux, Fedora), then adds the login to the docker group. Or install them by hand as docs/remote.md describes.',
   storage: 'Set Checkout storage to Automatic in Settings > Code: new checkouts then live in Docker volumes, which the sandbox user can write.',
   dataDir: 'Choose a data folder the container user can traverse, outside a private home directory (Settings > Code needs a restart for this one, or set dataDir in cordis.patch.yml).',

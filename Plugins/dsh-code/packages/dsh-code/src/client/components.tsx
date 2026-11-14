@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { Button, Input, Modal, SegmentedControl, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HostObservable, InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-import type { BrowserAction, CodeSessionView, CodeSettings, CodeSettingsView, GhAccount, IsolatedFrame, PreviewTargets, ProvisionStep, SessionOverrides, SessionOverridesView, SessionVariables, PendingWork, SelfTestReport, SessionEnvironment, WorkspaceUsage } from '../types.ts'
+import type { BrowserAction, CodeSessionView, CodeSettings, CodeSettingsView, FirewallView, TailscaleJoinView, GhAccount, IsolatedFrame, PreviewTargets, ProvisionStep, SessionOverrides, SessionOverridesView, SessionVariables, PendingWork, SelfTestReport, SessionEnvironment, WorkspaceUsage } from '../types.ts'
 import type { NS } from './locales.ts'
 
 type T = PropsLocale<typeof NS>['t']
@@ -379,10 +379,123 @@ export interface SettingsInjected {
   /** The Harness folder picker (in-app browser on the web, native dialog on desktop); null when cancelled or unavailable. */
   readonly pickFolder?: () => Promise<string | null>
   readonly save: (settings: CodeSettings) => Promise<Outcome<CodeSettingsView>>
+  readonly remoteAddress: () => Promise<Outcome<FirewallView>>
+  readonly detectAddress: () => Promise<Outcome<FirewallView>>
+  readonly tailscaleJoin: () => Promise<Outcome<TailscaleJoinView>>
+  readonly tailscaleStatus: () => Promise<Outcome<TailscaleJoinView>>
 }
 
-type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment' | 'remoteHost' | 'remotePort' | 'remoteUser' | 'remoteIdentityFile' | 'remoteHostKey', string>
-  & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean; storage: CodeSettings['storage'] }
+/** Commands in a selectable block with a Copy button. */
+function CommandBlock({ title, lines, t }: { readonly title: string; readonly lines: readonly string[]; readonly t: T }): ReactNode {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div style={{ display: 'grid', gap: 4 }}>
+      <div style={{ ...row, justifyContent: 'space-between' }}>
+        <span style={note}>{title}</span>
+        <Button size="sm" variant="outline" onClick={() => { void navigator.clipboard.writeText(lines.join('\n')).then(() => { setCopied(true) }, () => { setCopied(false) }) }}>{copied ? t('remote.copied') : t('remote.copy')}</Button>
+      </div>
+      <pre style={{ ...value, margin: 0, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{lines.join('\n')}</pre>
+    </div>
+  )
+}
+
+/**
+ * Restrict SSH to this dsh: the address the VM sees (or one from a public echo service, only on click) and the
+ * firewall commands for it. Optional and collapsed; it uses the saved settings, and shows the address only here.
+ */
+function RestrictSsh({ remoteAddress, detectAddress, saved, t }: { readonly remoteAddress: () => Promise<Outcome<FirewallView>>; readonly detectAddress: () => Promise<Outcome<FirewallView>>; readonly saved: boolean; readonly t: T }): ReactNode {
+  const [view, setView] = useState<FirewallView | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const run = (action: () => Promise<Outcome<FirewallView>>): void => {
+    setBusy(true)
+    setMessage(null)
+    void action().then((r) => {
+      setBusy(false)
+      if (r.ok) setView(r.value)
+      else setMessage(t('error.generic', { error: r.message }))
+    })
+  }
+  return (
+    <details style={{ display: 'grid', gap: 8 }}>
+      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>{t('remote.restrict')}</summary>
+      <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+        <div style={note}>{t('remote.restrictHint')}</div>
+        <div style={row}>
+          <Button size="sm" disabled={busy || !saved} onClick={() => { run(remoteAddress) }}>{t('remote.askVm')}</Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => { run(detectAddress) }}>{t('remote.detect')}</Button>
+        </div>
+        {!saved && <div style={note}>{t('remote.saveFirst')}</div>}
+        {message !== null && <div style={note} role="alert">{message}</div>}
+        {view !== null && (
+          <>
+            <div>{t('remote.address')}: <code style={value}>{view.address}</code></div>
+            <CommandBlock title={t('remote.azureAllow')} lines={view.allowOnly.azure} t={t} />
+            <CommandBlock title={t('remote.awsAllow')} lines={view.allowOnly.aws} t={t} />
+            {view.closePublic !== undefined && (
+              <>
+                <div style={note}>{t('remote.closeHint')}</div>
+                <CommandBlock title={t('remote.azureClose')} lines={view.closePublic.azure} t={t} />
+                <CommandBlock title={t('remote.awsClose')} lines={view.closePublic.aws} t={t} />
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </details>
+  )
+}
+
+/**
+ * Join the VM to Tailscale over the current SSH connection, then switch the host to its tailnet address. Optional;
+ * the user approves the VM in their own browser through the link Tailscale prints.
+ */
+function TailscaleJoinPanel({ join, status, onUse, saved, t }: { readonly join: () => Promise<Outcome<TailscaleJoinView>>; readonly status: () => Promise<Outcome<TailscaleJoinView>>; readonly onUse: (address: string) => void; readonly saved: boolean; readonly t: T }): ReactNode {
+  const [view, setView] = useState<TailscaleJoinView>({ state: 'idle' })
+  const [message, setMessage] = useState<string | null>(null)
+  const active = view.state === 'installing' || view.state === 'waiting-for-login'
+  useEffect(() => {
+    let live = true
+    void status().then((r) => { if (live && r.ok) setView(r.value) })
+    return () => { live = false }
+  }, [status])
+  useEffect(() => {
+    if (!active) return
+    const timer = setInterval(() => { void status().then((r) => { if (r.ok) setView(r.value) }) }, 2000)
+    return () => { clearInterval(timer) }
+  }, [active, status])
+  return (
+    <details style={{ display: 'grid', gap: 8 }}>
+      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>{t('remote.tailscale')}</summary>
+      <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
+        <div style={note}>{t('remote.tailscaleHint')}</div>
+        <div style={row}>
+          <Button size="sm" disabled={!saved || active} onClick={() => {
+            setMessage(null)
+            void join().then((r) => { if (r.ok) setView(r.value); else setMessage(t('error.generic', { error: r.message })) })
+          }}>{t('remote.tailscaleJoin')}</Button>
+        </div>
+        {!saved && <div style={note}>{t('remote.saveFirst')}</div>}
+        {view.state === 'installing' && <div style={note} role="status">{t('remote.tailscaleInstalling')}</div>}
+        {view.state === 'waiting-for-login' && view.loginUrl !== undefined && (
+          <div role="status">{t('remote.tailscaleLogin')} <a href={view.loginUrl} target="_blank" rel="noopener noreferrer">{view.loginUrl}</a></div>
+        )}
+        {view.state === 'joined' && view.address !== undefined && (
+          <div style={{ display: 'grid', gap: 6 }}>
+            <div>{t('remote.tailscaleJoined')}: <code style={value}>{view.address}</code></div>
+            <div style={row}><Button size="sm" variant="primary" onClick={() => { onUse(view.address!) }}>{t('remote.tailscaleUse')}</Button></div>
+            <div style={note}>{t('remote.tailscaleUseHint')}</div>
+          </div>
+        )}
+        {view.state === 'failed' && <div style={note} role="alert">{t('error.generic', { error: view.error ?? '' })}</div>}
+        {message !== null && <div style={note} role="alert">{message}</div>}
+      </div>
+    </details>
+  )
+}
+
+type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment' | 'remoteHost' | 'remotePort' | 'remoteUser' | 'remoteIdentityFile' | 'remoteHostKey' | 'remotePublicHost', string>
+  & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean; storage: CodeSettings['storage']; remoteNetwork: CodeSettings['remoteNetwork'] }
 
 function toDraft(settings: CodeSettings): Draft {
   return {
@@ -396,6 +509,7 @@ function toDraft(settings: CodeSettings): Draft {
     readOnlyWorkspace: settings.readOnlyWorkspace, dependencyCache: settings.dependencyCache, lockdown: settings.lockdown,
     previewEnabled: settings.previewEnabled, isolatedBrowser: settings.isolatedBrowser, storage: settings.storage,
     remoteHost: settings.remoteHost, remotePort: String(settings.remotePort), remoteUser: settings.remoteUser, remoteIdentityFile: settings.remoteIdentityFile, remoteHostKey: settings.remoteHostKey,
+    remoteNetwork: settings.remoteNetwork, remotePublicHost: settings.remotePublicHost,
   }
 }
 
@@ -418,6 +532,7 @@ export function fromDraft(draft: Draft): CodeSettings {
     readOnlyWorkspace: draft.readOnlyWorkspace, dependencyCache: draft.dependencyCache, lockdown: draft.lockdown,
     previewEnabled: draft.previewEnabled, isolatedBrowser: draft.isolatedBrowser, storage: draft.storage,
     remoteHost: draft.remoteHost.trim(), remotePort: Number(draft.remotePort), remoteUser: draft.remoteUser.trim(), remoteIdentityFile: draft.remoteIdentityFile.trim(), remoteHostKey: draft.remoteHostKey.trim(),
+    remoteNetwork: draft.remoteNetwork, remotePublicHost: draft.remotePublicHost.trim(),
   }
 }
 
@@ -426,7 +541,8 @@ export function fromDraft(draft: Draft): CodeSettings {
  * @param props - injected load/save and translator.
  * @returns the settings page.
  */
-export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: SettingsInjected & PropsLocale<typeof NS>): ReactNode {
+export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAddress, detectAddress, tailscaleJoin, tailscaleStatus, t }: SettingsInjected & PropsLocale<typeof NS>): ReactNode {
+  const [saved, setSaved] = useState<CodeSettings | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [logins, setLogins] = useState<GhAccount[] | null>(null)
   const [accountsError, setAccountsError] = useState<string | null>(null)
@@ -446,13 +562,16 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
     let live = true
     void load().then((r) => {
       if (!live) return
-      if (r.ok) { setDraft(toDraft(r.value.settings)); setWritable(r.value.writable) }
+      if (r.ok) { setDraft(toDraft(r.value.settings)); setSaved(r.value.settings); setWritable(r.value.writable) }
       else setMessage(t('error.generic', { error: r.message }))
     })
     return () => { live = false }
   }, [load, t])
   if (draft === null) return <div style={note}>{message ?? t('picker.loading')}</div>
-  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
+  // The VM actions use the running Code, so they wait until the remote fields on screen are saved.
+  const savedRemote = saved !== null && saved.remoteHost !== '' && saved.remoteHost === draft.remoteHost.trim() && String(saved.remotePort) === draft.remotePort.trim()
+    && saved.remoteUser === draft.remoteUser.trim() && saved.remoteIdentityFile === draft.remoteIdentityFile.trim() && saved.remoteHostKey === draft.remoteHostKey.trim()
+  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'remoteNetwork' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
     <label style={{ display: 'grid', gap: 4 }}>
       <span style={note}>{t(`settings.${key}`)}</span>
       <Input aria-label={t(`settings.${key}`)} type={type} value={draft[key]} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
@@ -482,7 +601,7 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
         setMessage(null)
         void save(fromDraft(draft)).then((r) => {
           setBusy(false)
-          if (r.ok) { setDraft(toDraft(r.value.settings)); setWritable(r.value.writable); setMessage(t(r.value.reloaded === true ? 'settings.savedReloaded' : 'settings.saved')) }
+          if (r.ok) { setDraft(toDraft(r.value.settings)); setSaved(r.value.settings); setWritable(r.value.writable); setMessage(t(r.value.reloaded === true ? 'settings.savedReloaded' : 'settings.saved')) }
           else setMessage(t('error.generic', { error: r.message }))
         })
       }}
@@ -597,11 +716,33 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, t }: Set
         {field('remoteHost')}
         {draft.remoteHost.trim() !== '' && (
           <>
+            <SegmentedControl<CodeSettings['remoteNetwork']>
+              id="dsh-code-remote-network"
+              label={t('settings.remoteNetwork')}
+              value={draft.remoteNetwork}
+              onChange={(remoteNetwork) => { setDraft({ ...draft, remoteNetwork }) }}
+              options={[
+                { value: 'public', label: t('settings.remoteNetwork.public') },
+                { value: 'private', label: t('settings.remoteNetwork.private') },
+              ]}
+            />
+            <div style={note}>{draft.remoteNetwork === 'private' ? t('settings.remoteNetwork.privateHint') : t('settings.remoteNetwork.publicHint')}</div>
             {field('remotePort', 'number')}
             {field('remoteUser')}
             {field('remoteIdentityFile')}
             {field('remoteHostKey')}
+            {draft.remoteNetwork === 'private' && field('remotePublicHost')}
             <div style={note}>{t('settings.remoteSaveHint')}</div>
+            <RestrictSsh remoteAddress={remoteAddress} detectAddress={detectAddress} saved={savedRemote} t={t} />
+            {draft.remoteNetwork === 'public' && (
+              <TailscaleJoinPanel
+                join={tailscaleJoin}
+                status={tailscaleStatus}
+                saved={savedRemote}
+                onUse={(address) => { setDraft({ ...draft, remotePublicHost: draft.remoteHost, remoteHost: address, remoteNetwork: 'private' }) }}
+                t={t}
+              />
+            )}
           </>
         )}
       </fieldset>

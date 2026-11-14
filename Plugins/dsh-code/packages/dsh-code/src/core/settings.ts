@@ -47,6 +47,16 @@ export function validateSettings(input: CodeSettings): CodeSettings {
   for (const field of ['remoteHost', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey'] as const) {
     if (typeof input[field] !== 'string') throw new SettingsError(field, 'must be text')
   }
+  if (input.remoteNetwork !== 'public' && input.remoteNetwork !== 'private') throw new SettingsError('remoteNetwork', 'must be public or private')
+  if (typeof input.remotePublicHost !== 'string') throw new SettingsError('remotePublicHost', 'must be text')
+  const remotePublicHost = input.remotePublicHost.trim()
+  if (remotePublicHost !== '') {
+    try {
+      validateRemote({ host: remotePublicHost, port: 22, user: 'x', identityFile: '/x', hostKey: `SHA256:${'A'.repeat(43)}` })
+    } catch {
+      throw new SettingsError('remotePublicHost', 'must be a host name or an IP address')
+    }
+  }
   let remote = { host: '', port: typeof input.remotePort === 'number' ? input.remotePort : 22, user: input.remoteUser.trim(), identityFile: input.remoteIdentityFile.trim(), hostKey: input.remoteHostKey.trim() }
   if (input.remoteHost.trim() !== '') {
     try {
@@ -116,6 +126,7 @@ export function validateSettings(input: CodeSettings): CodeSettings {
     isolatedBrowser: input.isolatedBrowser,
     storage: input.storage,
     remoteHost: remote.host, remotePort: remote.port, remoteUser: remote.user, remoteIdentityFile: remote.identityFile, remoteHostKey: remote.hostKey,
+    remoteNetwork: input.remoteNetwork, remotePublicHost,
   }
 }
 
@@ -123,7 +134,7 @@ export function validateSettings(input: CodeSettings): CodeSettings {
 export const SETTINGS_FIELDS = ['network', 'allow', 'privateAllow', 'ports', 'cpus', 'memoryMb', 'pids', 'tmpMb', 'maxWorkspaces', 'workerImage', 'previewPorts', 'disabledAccounts', 'newBranch', 'shmMb', 'readOnlyWorkspace', 'dependencyCache', 'readOnlyFolders', 'environment', 'lockdown', 'previewEnabled', 'isolatedBrowser', 'storage'] as const satisfies ReadonlyArray<keyof CodeSettings>
 
 /** Remote Docker host fields: saved from Settings > Code, but changing them reloads Code instead of applying live. */
-export const REMOTE_FIELDS = ['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey'] as const satisfies ReadonlyArray<keyof CodeSettings>
+export const REMOTE_FIELDS = ['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey', 'remoteNetwork', 'remotePublicHost'] as const satisfies ReadonlyArray<keyof CodeSettings>
 
 const REMOTE_FIELD_OF = { host: 'remoteHost', port: 'remotePort', user: 'remoteUser', identityFile: 'remoteIdentityFile', hostKey: 'remoteHostKey' } as const
 
