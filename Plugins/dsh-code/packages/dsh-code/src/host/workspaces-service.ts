@@ -23,12 +23,12 @@ import { WorkspaceError, WorkspaceManager, type WorkspaceManagerConfig, type Wor
 import { EnvironmentError, environmentLines, parseEnvironment } from '../core/environment.ts'
 import { GitHubProvider, SourceControlError } from '../core/github.ts'
 import type { FirewallView, TailscaleJoinView, AccountRepositories, BranchList, BrowserAction, GhAccount, IsolatedFrame, PreviewTargets, ProvisionStep, SessionOverrides, SessionOverridesView, SessionVariables, CodeSessionView, CodeSettings, CodeSettingsView, PendingWork, PushResult, RepositorySummary, SelfTestReport, SessionEnvironment, WorkspaceUsage } from '../types.ts'
-import { onlySettingsChanged, REMOTE_FIELDS, SETTINGS_FIELDS, SettingsError, validateSettings } from '../core/settings.ts'
+import { onlySettingsChanged, REMOTE_FIELDS, remoteActive, remoteViaOf, SETTINGS_FIELDS, SettingsError, validateSettings } from '../core/settings.ts'
 import { PREVIEW_PREFIX, PreviewProxy, relayConnection } from './preview.ts'
 import { IsolatedBrowsers } from './browser.ts'
 import { Git, gitRunner } from '../core/git.ts'
 import { DockerCli, processRunner } from '../core/docker.ts'
-import { REMOTE_ALIAS, RemoteError as RemoteSettingsError, validateRemote, writeRemoteFiles } from '../core/remote.ts'
+import { REMOTE_ALIAS, RemoteError as RemoteSettingsError, stopBastionTunnel, validateRemote, validateVia, viaLabel, writeRemoteFiles } from '../core/remote.ts'
 import { allowOnlyCommands, closePublicCommands, detectPublicAddress } from '../core/network-path.ts'
 import { TailscaleJoin } from '../core/tailscale.ts'
 import { DEFAULT_ALLOW, type EgressMode } from '../egress/policy.ts'
@@ -74,6 +74,14 @@ export interface Config {
   remoteHostKey: string
   remoteNetwork: 'public' | 'private'
   remotePublicHost: string
+  remoteVia: 'direct' | 'aws-ssm' | 'azure-bastion'
+  remoteAwsInstanceId: string
+  remoteAwsRegion: string
+  remoteAwsProfile: string
+  remoteAzureBastion: string
+  remoteAzureResourceGroup: string
+  remoteAzureVmId: string
+  remoteAzureSubscription: string
   addressEchoUrl: string
   defaultAccount: string
   disabledAccounts: string[]
@@ -123,6 +131,14 @@ export const Config: z<Config> = z.object({
   remoteHostKey: z.string().default('').description('SHA256 host key fingerprint of the remote Docker host; any other key is refused'),
   remoteNetwork: z.union(['public', 'private'] as const).default('public').description('public: SSH to the VM\'s internet address; private: over Tailscale or WireGuard'),
   remotePublicHost: z.string().default('').description('With a private network: the VM\'s public address, checked from here to be unreachable'),
+  remoteVia: z.union(['direct', 'aws-ssm', 'azure-bastion'] as const).default('direct').description('How SSH reaches the remote host: its address, AWS Session Manager, or an Azure Bastion tunnel'),
+  remoteAwsInstanceId: z.string().default('').description('Session Manager: the EC2 instance ID'),
+  remoteAwsRegion: z.string().default('').description('Session Manager: the instance\'s AWS region'),
+  remoteAwsProfile: z.string().default('').description('Session Manager: an AWS CLI profile (optional)'),
+  remoteAzureBastion: z.string().default('').description('Bastion: the Azure Bastion name'),
+  remoteAzureResourceGroup: z.string().default('').description('Bastion: the Bastion\'s resource group'),
+  remoteAzureVmId: z.string().default('').description('Bastion: the VM\'s resource ID'),
+  remoteAzureSubscription: z.string().default('').description('Bastion: the subscription ID (optional)'),
   addressEchoUrl: z.string().default('https://checkip.amazonaws.com').description('Service Detect asks for this computer\'s internet address (only when the user clicks Detect)'),
   storage: z.union(['auto', 'bind', 'volume'] as const).default('auto').description('Where new checkouts live: auto picks a host folder when the sandbox user can write one, else a Docker volume'),
   newBranch: z.boolean().default(true).description('Give each Code session its own dsh-code/<hash> branch; false works on the chosen branch'),
@@ -182,6 +198,8 @@ function settingsOf(config: Config): CodeSettings {
     remoteHost: config.remoteHost, remotePort: config.remotePort, remoteUser: config.remoteUser,
     remoteIdentityFile: config.remoteIdentityFile, remoteHostKey: config.remoteHostKey,
     remoteNetwork: config.remoteNetwork, remotePublicHost: config.remotePublicHost,
+    remoteVia: config.remoteVia, remoteAwsInstanceId: config.remoteAwsInstanceId, remoteAwsRegion: config.remoteAwsRegion, remoteAwsProfile: config.remoteAwsProfile,
+    remoteAzureBastion: config.remoteAzureBastion, remoteAzureResourceGroup: config.remoteAzureResourceGroup, remoteAzureVmId: config.remoteAzureVmId, remoteAzureSubscription: config.remoteAzureSubscription,
   }
 }
 
@@ -190,12 +208,28 @@ function settingsOf(config: Config): CodeSettings {
  * are valid, or the reason they are not (Code then starts no workspace rather than falling back to this computer).
  */
 function remoteOf(config: Config, dataDir: string): Pick<WorkspaceManagerConfig, 'remote' | 'remoteError'> {
-  if (config.remoteHost.trim() === '') return {}
+  if (!remoteActive(config)) return {}
   try {
-    const host = validateRemote({ host: config.remoteHost, port: config.remotePort, user: config.remoteUser, identityFile: config.remoteIdentityFile, hostKey: config.remoteHostKey })
+    const via = validateVia(remoteViaOf(config))
+    const host = validateRemote({ host: viaLabel(via) ?? config.remoteHost, port: config.remotePort, user: config.remoteUser, identityFile: config.remoteIdentityFile, hostKey: config.remoteHostKey, via })
     const which = (name: string): string => execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim()
+    const find = (name: string): string => {
+      try {
+        return which(name)
+      } catch {
+        throw new RemoteSettingsError('connection', `${name} is not installed on this computer (see docs/remote.md)`)
+      }
+    }
+    const tools = {
+      ssh: find('ssh'), docker: find('docker'),
+      ...via.kind === 'aws-ssm' ? { aws: find('aws') } : {},
+      ...via.kind === 'azure-bastion' ? { az: find('az'), node: process.execPath } : {},
+    }
+    if (via.kind === 'aws-ssm') find('session-manager-plugin')
     const dir = join(dataDir, 'remote')
-    return { remote: { host, dir, dockerBinary: writeRemoteFiles(dir, host, { ssh: which('ssh'), docker: which('docker') }), network: config.remoteNetwork, publicHost: config.remotePublicHost.trim() } }
+    // A direct path may be public or private; Session Manager and Bastion need no inbound port, like a private network.
+    const network = via.kind === 'direct' ? config.remoteNetwork : undefined
+    return { remote: { host, dir, dockerBinary: writeRemoteFiles(dir, host, tools), ...network === undefined ? {} : { network }, publicHost: via.kind === 'direct' ? config.remotePublicHost.trim() : '' } }
   } catch (error) {
     return { remoteError: error instanceof RemoteSettingsError ? `${error.field}: ${error.message}` : `the remote Docker host cannot be used: ${String(error)}` }
   }
@@ -268,6 +302,8 @@ export class CodeWorkspacesService extends TypertRemoteService {
       if (server === undefined) return
       scoped.effect(() => server.register({ kind: 'prefix', path: PREVIEW_PREFIX, handler: (req, res) => this.previews.handle(req, res) }), 'dsh-code: preview route')
     })
+    // Code's Bastion tunnel ends with this service.
+    ctx.effect(() => () => { const dir = this.manager.config.remote?.dir; if (dir !== undefined && this.manager.config.remote?.host.via?.kind === 'azure-bastion') stopBastionTunnel(dir) }, 'dsh-code: stop the Bastion tunnel')
     // A Tailscale join waiting for the user's approval ends with this service.
     ctx.effect(() => () => { if (this.tailscale.status().state === 'installing' || this.tailscale.status().state === 'waiting-for-login') this.tailscale.stop('Code reloaded; start the join again') }, 'dsh-code: stop a Tailscale join')
     ctx.effect(() => {
@@ -546,15 +582,19 @@ export class CodeWorkspacesService extends TypertRemoteService {
   async settings(): Promise<CodeSettingsView> {
     return {
       settings: settingsOf(this.config), writable: this.ctx.get('configEditor' as never) !== undefined && this.entry !== undefined,
-      ...await this.privateLoginOk() ? { privateLoginOk: true } : {},
+      ...await this.privateLoginOk() ? { privateLoginOk: true, closePublic: closePublicCommands(this.manager.config.remote?.host.port ?? 22) } : {},
     }
   }
 
   /** Whether the last setup check logged in over a private network address (then closing public SSH is safe to show). */
   private async privateLoginOk(): Promise<boolean> {
-    if (this.manager.config.remote?.network !== 'private' || this.selfTestReport === undefined) return false
+    const remote = this.manager.config.remote
+    if (remote === undefined || this.selfTestReport === undefined) return false
     const report = await this.selfTestReport.catch(() => undefined)
-    return report?.checks.some(c => c.id === 'remote' && c.ok) === true && report.checks.some(c => c.id === 'private-network' && c.ok)
+    if (report?.checks.some(c => c.id === 'remote' && c.ok) !== true) return false
+    // Session Manager and Bastion need no inbound SSH at all; a private network needs a private host address.
+    const proxied = remote.host.via !== undefined && remote.host.via.kind !== 'direct'
+    return proxied || (remote.network === 'private' && report.checks.some(c => c.id === 'private-network' && c.ok))
   }
 
   /**

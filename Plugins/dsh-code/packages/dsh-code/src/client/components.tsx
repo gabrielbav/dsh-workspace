@@ -432,13 +432,6 @@ function RestrictSsh({ remoteAddress, detectAddress, saved, t }: { readonly remo
             <div>{t('remote.address')}: <code style={value}>{view.address}</code></div>
             <CommandBlock title={t('remote.azureAllow')} lines={view.allowOnly.azure} t={t} />
             <CommandBlock title={t('remote.awsAllow')} lines={view.allowOnly.aws} t={t} />
-            {view.closePublic !== undefined && (
-              <>
-                <div style={note}>{t('remote.closeHint')}</div>
-                <CommandBlock title={t('remote.azureClose')} lines={view.closePublic.azure} t={t} />
-                <CommandBlock title={t('remote.awsClose')} lines={view.closePublic.aws} t={t} />
-              </>
-            )}
           </>
         )}
       </div>
@@ -494,8 +487,8 @@ function TailscaleJoinPanel({ join, status, onUse, saved, t }: { readonly join: 
   )
 }
 
-type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment' | 'remoteHost' | 'remotePort' | 'remoteUser' | 'remoteIdentityFile' | 'remoteHostKey' | 'remotePublicHost', string>
-  & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean; storage: CodeSettings['storage']; remoteNetwork: CodeSettings['remoteNetwork'] }
+type Draft = Record<'allow' | 'privateAllow' | 'ports' | 'previewPorts' | 'cpus' | 'memoryMb' | 'pids' | 'tmpMb' | 'maxWorkspaces' | 'workerImage' | 'shmMb' | 'readOnlyFolders' | 'environment' | 'remoteHost' | 'remotePort' | 'remoteUser' | 'remoteIdentityFile' | 'remoteHostKey' | 'remotePublicHost' | 'remoteAwsInstanceId' | 'remoteAwsRegion' | 'remoteAwsProfile' | 'remoteAzureBastion' | 'remoteAzureResourceGroup' | 'remoteAzureVmId' | 'remoteAzureSubscription', string>
+  & { network: CodeSettings['network']; disabledAccounts: readonly string[]; newBranch: boolean; readOnlyWorkspace: boolean; dependencyCache: boolean; lockdown: boolean; previewEnabled: boolean; isolatedBrowser: boolean; storage: CodeSettings['storage']; remoteNetwork: CodeSettings['remoteNetwork']; remoteVia: CodeSettings['remoteVia'] }
 
 function toDraft(settings: CodeSettings): Draft {
   return {
@@ -509,7 +502,8 @@ function toDraft(settings: CodeSettings): Draft {
     readOnlyWorkspace: settings.readOnlyWorkspace, dependencyCache: settings.dependencyCache, lockdown: settings.lockdown,
     previewEnabled: settings.previewEnabled, isolatedBrowser: settings.isolatedBrowser, storage: settings.storage,
     remoteHost: settings.remoteHost, remotePort: String(settings.remotePort), remoteUser: settings.remoteUser, remoteIdentityFile: settings.remoteIdentityFile, remoteHostKey: settings.remoteHostKey,
-    remoteNetwork: settings.remoteNetwork, remotePublicHost: settings.remotePublicHost,
+    remoteNetwork: settings.remoteNetwork, remotePublicHost: settings.remotePublicHost, remoteVia: settings.remoteVia,
+    remoteAwsInstanceId: settings.remoteAwsInstanceId, remoteAwsRegion: settings.remoteAwsRegion, remoteAwsProfile: settings.remoteAwsProfile, remoteAzureBastion: settings.remoteAzureBastion, remoteAzureResourceGroup: settings.remoteAzureResourceGroup, remoteAzureVmId: settings.remoteAzureVmId, remoteAzureSubscription: settings.remoteAzureSubscription,
   }
 }
 
@@ -532,7 +526,8 @@ export function fromDraft(draft: Draft): CodeSettings {
     readOnlyWorkspace: draft.readOnlyWorkspace, dependencyCache: draft.dependencyCache, lockdown: draft.lockdown,
     previewEnabled: draft.previewEnabled, isolatedBrowser: draft.isolatedBrowser, storage: draft.storage,
     remoteHost: draft.remoteHost.trim(), remotePort: Number(draft.remotePort), remoteUser: draft.remoteUser.trim(), remoteIdentityFile: draft.remoteIdentityFile.trim(), remoteHostKey: draft.remoteHostKey.trim(),
-    remoteNetwork: draft.remoteNetwork, remotePublicHost: draft.remotePublicHost.trim(),
+    remoteNetwork: draft.remoteNetwork, remotePublicHost: draft.remotePublicHost.trim(), remoteVia: draft.remoteVia,
+    remoteAwsInstanceId: draft.remoteAwsInstanceId.trim(), remoteAwsRegion: draft.remoteAwsRegion.trim(), remoteAwsProfile: draft.remoteAwsProfile.trim(), remoteAzureBastion: draft.remoteAzureBastion.trim(), remoteAzureResourceGroup: draft.remoteAzureResourceGroup.trim(), remoteAzureVmId: draft.remoteAzureVmId.trim(), remoteAzureSubscription: draft.remoteAzureSubscription.trim(),
   }
 }
 
@@ -543,6 +538,7 @@ export function fromDraft(draft: Draft): CodeSettings {
  */
 export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAddress, detectAddress, tailscaleJoin, tailscaleStatus, t }: SettingsInjected & PropsLocale<typeof NS>): ReactNode {
   const [saved, setSaved] = useState<CodeSettings | null>(null)
+  const [closePublic, setClosePublic] = useState<CodeSettingsView['closePublic'] | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [logins, setLogins] = useState<GhAccount[] | null>(null)
   const [accountsError, setAccountsError] = useState<string | null>(null)
@@ -562,16 +558,17 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
     let live = true
     void load().then((r) => {
       if (!live) return
-      if (r.ok) { setDraft(toDraft(r.value.settings)); setSaved(r.value.settings); setWritable(r.value.writable) }
+      if (r.ok) { setDraft(toDraft(r.value.settings)); setSaved(r.value.settings); setClosePublic(r.value.closePublic ?? null); setWritable(r.value.writable) }
       else setMessage(t('error.generic', { error: r.message }))
     })
     return () => { live = false }
   }, [load, t])
   if (draft === null) return <div style={note}>{message ?? t('picker.loading')}</div>
   // The VM actions use the running Code, so they wait until the remote fields on screen are saved.
-  const savedRemote = saved !== null && saved.remoteHost !== '' && saved.remoteHost === draft.remoteHost.trim() && String(saved.remotePort) === draft.remotePort.trim()
-    && saved.remoteUser === draft.remoteUser.trim() && saved.remoteIdentityFile === draft.remoteIdentityFile.trim() && saved.remoteHostKey === draft.remoteHostKey.trim()
-  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'remoteNetwork' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
+  const remoteOn = draft.remoteVia === 'aws-ssm' ? draft.remoteAwsInstanceId.trim() !== '' : draft.remoteVia === 'azure-bastion' ? draft.remoteAzureVmId.trim() !== '' : draft.remoteHost.trim() !== ''
+  const current = fromDraft(draft)
+  const savedRemote = saved !== null && remoteOn && (['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey', 'remoteVia', 'remoteAwsInstanceId', 'remoteAwsRegion', 'remoteAwsProfile', 'remoteAzureBastion', 'remoteAzureResourceGroup', 'remoteAzureVmId', 'remoteAzureSubscription'] as const).every(key => saved[key] === current[key])
+  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'remoteNetwork' | 'remoteVia' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
     <label style={{ display: 'grid', gap: 4 }}>
       <span style={note}>{t(`settings.${key}`)}</span>
       <Input aria-label={t(`settings.${key}`)} type={type} value={draft[key]} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
@@ -713,8 +710,45 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
       <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
         <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.remote')}</legend>
         <div style={note}>{t('settings.remoteHint')}</div>
-        {field('remoteHost')}
-        {draft.remoteHost.trim() !== '' && (
+        <SegmentedControl<CodeSettings['remoteVia']>
+          id="dsh-code-remote-via"
+          label={t('settings.remoteVia')}
+          value={draft.remoteVia}
+          onChange={(remoteVia) => { setDraft({ ...draft, remoteVia }) }}
+          options={[
+            { value: 'direct', label: t('settings.remoteVia.direct') },
+            { value: 'aws-ssm', label: t('settings.remoteVia.awsSsm') },
+            { value: 'azure-bastion', label: t('settings.remoteVia.azureBastion') },
+          ]}
+        />
+        {draft.remoteVia === 'direct' && field('remoteHost')}
+        {draft.remoteVia === 'aws-ssm' && (
+          <>
+            <div style={note}>{t('settings.remoteVia.awsSsmHint')}</div>
+            {field('remoteAwsInstanceId')}
+            {field('remoteAwsRegion')}
+            {field('remoteAwsProfile')}
+          </>
+        )}
+        {draft.remoteVia === 'azure-bastion' && (
+          <>
+            <div style={note}>{t('settings.remoteVia.azureBastionHint')}</div>
+            {field('remoteAzureBastion')}
+            {field('remoteAzureResourceGroup')}
+            {field('remoteAzureVmId')}
+            {field('remoteAzureSubscription')}
+          </>
+        )}
+        {remoteOn && draft.remoteVia !== 'direct' && (
+          <>
+            {field('remotePort', 'number')}
+            {field('remoteUser')}
+            {field('remoteIdentityFile')}
+            {field('remoteHostKey')}
+            <div style={note}>{t('settings.remoteSaveHint')}</div>
+          </>
+        )}
+        {remoteOn && draft.remoteVia === 'direct' && (
           <>
             <SegmentedControl<CodeSettings['remoteNetwork']>
               id="dsh-code-remote-network"
@@ -744,6 +778,13 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
               />
             )}
           </>
+        )}
+        {remoteOn && closePublic !== null && closePublic !== undefined && savedRemote && (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <div style={note}>{t('remote.closeHint')}</div>
+            <CommandBlock title={t('remote.azureClose')} lines={closePublic.azure} t={t} />
+            <CommandBlock title={t('remote.awsClose')} lines={closePublic.aws} t={t} />
+          </div>
         )}
       </fieldset>
       {field('workerImage')}

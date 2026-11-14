@@ -11,7 +11,7 @@
  */
 import { execFile, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isIP } from 'node:net'
 
@@ -26,6 +26,74 @@ export interface RemoteHost {
   readonly identityFile: string
   /** The VM's host key fingerprint as `ssh-keygen -l` prints it, `SHA256:…`. */
   readonly hostKey: string
+  /** How SSH reaches the VM; direct when absent. */
+  readonly via?: RemoteVia
+}
+
+/**
+ * The path SSH takes to the VM. `direct`: its address (public, Tailscale or WireGuard). `aws-ssm`: AWS Systems
+ * Manager Session Manager, no inbound port at all. `azure-bastion`: an Azure Bastion tunnel, no public IP needed.
+ * Both use the user's own cloud CLI and its credentials on this computer; Code never reads or stores them.
+ */
+export type RemoteVia =
+  | { readonly kind: 'direct' }
+  | { readonly kind: 'aws-ssm'; readonly instanceId: string; readonly region: string; readonly profile?: string }
+  | { readonly kind: 'azure-bastion'; readonly bastion: string; readonly resourceGroup: string; readonly vmId: string; readonly subscription?: string }
+
+/** Absolute paths of the tools a connection needs. */
+export interface RemoteTools {
+  readonly ssh: string
+  readonly docker: string
+  /** The AWS CLI, for Session Manager. */
+  readonly aws?: string
+  /** The Azure CLI, for Bastion. */
+  readonly az?: string
+  /** Node, which runs Code's Bastion tunnel helper. */
+  readonly node?: string
+}
+
+/**
+ * Check the connection path at the input boundary; the values end up in a ProxyCommand line.
+ * @param via - candidate path.
+ * @returns the same path, trimmed.
+ */
+export function validateVia(via: RemoteVia): RemoteVia {
+  if (via.kind === 'direct') return via
+  if (via.kind === 'aws-ssm') {
+    const instanceId = via.instanceId.trim()
+    const region = via.region.trim()
+    const profile = via.profile?.trim() ?? ''
+    if (!/^(i|mi)-[0-9a-f]{8,17}$/.test(instanceId)) throw new RemoteError('host', 'the instance ID must look like i-0123456789abcdef0')
+    if (!/^[a-z]{2}(-gov)?-[a-z]+-\d$/.test(region)) throw new RemoteError('host', 'the AWS region must look like eu-west-1')
+    if (profile !== '' && !/^[A-Za-z0-9_.-]{1,64}$/.test(profile)) throw new RemoteError('host', 'the AWS profile must be a profile name')
+    return { kind: 'aws-ssm', instanceId, region, ...profile === '' ? {} : { profile } }
+  }
+  const bastion = via.bastion.trim()
+  const resourceGroup = via.resourceGroup.trim()
+  const vmId = via.vmId.trim()
+  const subscription = via.subscription?.trim() ?? ''
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(bastion)) throw new RemoteError('host', 'the Bastion name must be an Azure resource name')
+  if (!/^[-\w.()]{1,90}$/.test(resourceGroup)) throw new RemoteError('host', 'the resource group must be an Azure resource group name')
+  if (!/^\/subscriptions\/[0-9a-f-]{36}\/resourceGroups\/[-\w.()]{1,90}\/providers\/Microsoft\.Compute\/virtualMachines\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/i.test(vmId)) {
+    throw new RemoteError('host', 'the VM resource ID must look like /subscriptions/<id>/resourceGroups/<group>/providers/Microsoft.Compute/virtualMachines/<name>')
+  }
+  if (subscription !== '' && !/^[0-9a-f-]{36}$/i.test(subscription)) throw new RemoteError('host', 'the subscription must be a subscription ID')
+  return { kind: 'azure-bastion', bastion, resourceGroup, vmId, ...subscription === '' ? {} : { subscription } }
+}
+
+/**
+ * The name a proxied VM goes by in Code's SSH config and connection socket: its instance ID or VM name.
+ * @param via - a validated path.
+ * @returns a host-name-like label, or undefined for direct.
+ */
+export function viaLabel(via: RemoteVia | undefined): string | undefined {
+  if (via === undefined || via.kind === 'direct') return undefined
+  return via.kind === 'aws-ssm' ? via.instanceId : via.vmId.split('/').pop()!
+}
+
+/** The local port of one Azure Bastion tunnel, from the connection id (40000–49999). */
+export function bastionPort(remote: Pick<RemoteHost, 'user' | 'host' | 'port'>): number {
+  return 40000 + (Number.parseInt(connectionId(remote), 16) % 10000)
 }
 
 /**
@@ -93,7 +161,8 @@ export function validateRemote(remote: RemoteHost): RemoteHost {
   if (!identityFile.startsWith('/') || /[\s"'\\]/.test(identityFile) || identityFile.split('/').includes('..')) throw new RemoteError('identityFile', 'must be an absolute path without spaces or quotes')
   const hostKey = remote.hostKey.trim()
   if (!/^SHA256:[A-Za-z0-9+/]{43}=?$/.test(hostKey)) throw new RemoteError('hostKey', 'must be a SHA256 fingerprint as ssh-keygen -l prints it, for example SHA256:abc…')
-  return { host, port: remote.port, user, identityFile, hostKey: hostKey.replace(/=$/, '') }
+  const via = remote.via === undefined || remote.via.kind === 'direct' ? undefined : validateVia(remote.via)
+  return { host, port: remote.port, user, identityFile, hostKey: hostKey.replace(/=$/, ''), ...via === undefined ? {} : { via } }
 }
 
 /**
@@ -102,12 +171,21 @@ export function validateRemote(remote: RemoteHost): RemoteHost {
  * @param remote - validated settings.
  * @returns the file content.
  */
-export function sshConfig(dir: string, remote: RemoteHost): string {
+export function sshConfig(dir: string, remote: RemoteHost, tools: Partial<RemoteTools> = {}): string {
   const q = (path: string): string => `"${path}"`
+  const via = remote.via
+  const proxy = via === undefined || via.kind === 'direct'
+    ? []
+    : via.kind === 'aws-ssm'
+      ? [`  ProxyCommand '${tools.aws ?? 'aws'}' ssm start-session --target ${via.instanceId} --document-name AWS-StartSSHSession --parameters portNumber=%p --region ${via.region}${via.profile === undefined ? '' : ` --profile ${via.profile}`}`]
+      : [`  ProxyCommand '${tools.node ?? 'node'}' '${join(dir, 'bastion-proxy.mjs')}'`]
   return [
     `Host ${REMOTE_ALIAS}`,
     `  HostName ${remote.host}`,
     `  Port ${remote.port}`,
+    ...proxy,
+    // Through a proxy the address is not the VM's own, so known_hosts names the VM by Code's alias.
+    ...proxy.length === 0 ? [] : [`  HostKeyAlias ${REMOTE_ALIAS}`],
     `  User ${remote.user}`,
     `  IdentityFile ${q(remote.identityFile)}`,
     '  IdentitiesOnly yes',
@@ -141,12 +219,17 @@ export function sshConfig(dir: string, remote: RemoteHost): string {
  * @param tools - absolute paths of the real `ssh` and `docker`.
  * @returns the `docker` wrapper to run instead of `docker`.
  */
-export function writeRemoteFiles(dir: string, remote: RemoteHost, tools: { readonly ssh: string; readonly docker: string }): string {
-  if (/["'\\\n$`]/.test(dir) || /["'\\\n$`]/.test(tools.ssh) || /["'\\\n$`]/.test(tools.docker)) throw new RemoteError('connection', `the Code data folder and the ssh and docker paths must not contain quotes, backslashes, $ or backticks: ${dir}`)
+export function writeRemoteFiles(dir: string, remote: RemoteHost, tools: RemoteTools): string {
+  if ([dir, tools.ssh, tools.docker, tools.aws ?? '', tools.az ?? '', tools.node ?? ''].some(path => /["'\\\n$`]/.test(path))) throw new RemoteError('connection', `the Code data folder and the ssh and docker paths must not contain quotes, backslashes, $ or backticks: ${dir}`)
   // A connection still open to the host configured before must not carry the next commands.
   if (existsSync(join(dir, 'ssh_config'))) spawnSync(tools.ssh, ['-F', join(dir, 'ssh_config'), '-O', 'exit', REMOTE_ALIAS], { timeout: 5000, stdio: 'ignore' })
   mkdirSync(join(dir, 'bin'), { recursive: true, mode: 0o700 })
-  writeFileSync(join(dir, 'ssh_config'), sshConfig(dir, remote), { mode: 0o600 })
+  writeFileSync(join(dir, 'ssh_config'), sshConfig(dir, remote, tools), { mode: 0o600 })
+  if (remote.via?.kind === 'azure-bastion') {
+    const via = remote.via
+    writeFileSync(join(dir, 'bastion.json'), JSON.stringify({ az: tools.az ?? 'az', name: via.bastion, resourceGroup: via.resourceGroup, vmId: via.vmId, subscription: via.subscription, resourcePort: remote.port, port: bastionPort(remote) }), { mode: 0o600 })
+    writeFileSync(join(dir, 'bastion-proxy.mjs'), BASTION_PROXY, { mode: 0o600 })
+  }
   // Start with no trusted key: until pinHostKey checks the fingerprint the user gave, SSH refuses the VM.
   writeFileSync(join(dir, 'known_hosts'), '', { mode: 0o600 })
   const ssh = join(dir, 'bin', 'ssh')
@@ -206,6 +289,10 @@ export async function pinHostKey(dir: string, remote: RemoteHost, tools: { reado
 }
 
 async function pin(dir: string, remote: RemoteHost, tools: { readonly sshKeyscan?: string; readonly sshKeygen?: string }): Promise<void> {
+  if (remote.via !== undefined && remote.via.kind !== 'direct') {
+    await pinThroughProxy(dir, remote, tools.sshKeygen)
+    return
+  }
   const scan = await run(tools.sshKeyscan ?? 'ssh-keyscan', ['-T', '10', '-p', String(remote.port), remote.host], undefined, 20_000)
   const lines = scan.stdout.split('\n').map(l => l.trim()).filter(l => l !== '' && !l.startsWith('#'))
   if (lines.length === 0) throw new RemoteError('connection', `no SSH server answered at ${remote.host}:${remote.port}. Check the address, the port and that the VM's firewall (Azure network security group, AWS security group) allows SSH from this computer.`)
@@ -215,6 +302,84 @@ async function pin(dir: string, remote: RemoteHost, tools: { readonly sshKeyscan
     throw new RemoteError('hostKey', `the server at ${remote.host}:${remote.port} does not have the host key ${remote.hostKey}. It offered ${keys.map(k => `${k.fingerprint} (${k.type})`).join(', ')}. Compare with the VM's own fingerprint (see docs/remote.md) before using any of them.`)
   }
   writeFileSync(join(dir, 'known_hosts'), `${pinned.map(k => k.line).join('\n')}\n`, { mode: 0o600 })
+}
+
+/**
+ * Pin the host key of a VM reached through Session Manager or Bastion, where ssh-keyscan cannot go: SSH itself
+ * records the key the server presents before any login (authentication method `none`, so no key is offered), one
+ * key type at a time, and only a key with the user's fingerprint is kept.
+ */
+async function pinThroughProxy(dir: string, remote: RemoteHost, sshKeygen?: string): Promise<void> {
+  const offered: { line: string; fingerprint: string; type: string }[] = []
+  for (const algorithm of ['ssh-ed25519', 'ecdsa-sha2-nistp256', 'rsa-sha2-512']) {
+    const scratch = join(dir, `known_hosts.probe`)
+    writeFileSync(scratch, '', { mode: 0o600 })
+    await run(join(dir, 'bin', 'ssh'), ['-T', '-o', `UserKnownHostsFile=${scratch}`, '-o', 'StrictHostKeyChecking=accept-new', '-o', `HostKeyAlgorithms=${algorithm}`,
+      '-o', 'PreferredAuthentications=none', '-o', 'PubkeyAuthentication=no', '-o', 'ControlMaster=no', '-o', 'ControlPath=none', REMOTE_ALIAS, 'true'], undefined, 90_000)
+    const lines = readFileSync(scratch, 'utf8').split('\n').map(l => l.trim()).filter(l => l !== '' && !l.startsWith('#'))
+    rmSync(scratch, { force: true })
+    offered.push(...await fingerprints(lines, sshKeygen))
+    const match = offered.find(k => k.fingerprint === remote.hostKey)
+    if (match !== undefined) {
+      writeFileSync(join(dir, 'known_hosts'), `${match.line}\n`, { mode: 0o600 })
+      return
+    }
+  }
+  if (offered.length === 0) throw new RemoteError('connection', `the ${remote.via?.kind === 'aws-ssm' ? 'Session Manager' : 'Bastion'} connection to the VM did not open. Check the cloud CLI is installed and logged in on this computer and the settings (docs/remote.md).`)
+  throw new RemoteError('hostKey', `the VM does not have the host key ${remote.hostKey}. It offered ${offered.map(k => `${k.fingerprint} (${k.type})`).join(', ')}. Compare with the VM's own fingerprint (see docs/remote.md) before using any of them.`)
+}
+
+/**
+ * Code's ProxyCommand for Azure Bastion: opens `az network bastion tunnel` to the VM's SSH port on a local port when
+ * none is listening, waits for it, then carries SSH over it. The tunnel outlives one SSH connection (Code's shared
+ * connection uses one at a time) and is stopped with Code ({@link stopBastionTunnel}).
+ */
+export const BASTION_PROXY = `import { spawn } from 'node:child_process'
+import { connect } from 'node:net'
+import { openSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const dir = dirname(fileURLToPath(import.meta.url))
+const c = JSON.parse(readFileSync(join(dir, 'bastion.json'), 'utf8'))
+const open = () => new Promise((resolve) => {
+  const socket = connect(c.port, '127.0.0.1')
+  socket.once('connect', () => resolve(socket))
+  socket.once('error', () => resolve(undefined))
+})
+let socket = await open()
+if (socket === undefined) {
+  const log = openSync(join(dir, 'bastion.log'), 'a')
+  const args = ['network', 'bastion', 'tunnel', '--name', c.name, '--resource-group', c.resourceGroup, '--target-resource-id', c.vmId, '--resource-port', String(c.resourcePort), '--port', String(c.port)]
+  if (c.subscription) args.push('--subscription', c.subscription)
+  const child = spawn(c.az, args, { detached: true, stdio: ['ignore', log, log] })
+  child.unref()
+  writeFileSync(join(dir, 'bastion.pid'), String(child.pid))
+  for (let i = 0; i < 120 && socket === undefined; i++) {
+    await new Promise(r => setTimeout(r, 500))
+    socket = await open()
+  }
+  if (socket === undefined) {
+    process.stderr.write('dsh-code: the Azure Bastion tunnel did not open; see ' + join(dir, 'bastion.log') + '\\n')
+    process.exit(1)
+  }
+}
+process.stdin.pipe(socket)
+socket.pipe(process.stdout)
+socket.on('close', () => process.exit(0))
+`
+
+/**
+ * Stop the Azure Bastion tunnel Code started, if any.
+ * @param dir - Code's remote folder.
+ */
+export function stopBastionTunnel(dir: string): void {
+  try {
+    const pid = Number(readFileSync(join(dir, 'bastion.pid'), 'utf8').trim())
+    if (Number.isInteger(pid) && pid > 1) process.kill(pid)
+  } catch {
+    // No tunnel was started, or it already ended.
+  }
+  rmSync(join(dir, 'bastion.pid'), { force: true })
 }
 
 /**

@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { connectionId, fingerprints, pinHostKey, RemoteError, sshConfig, validateRemote, writeRemoteFiles, type RemoteHost } from '../src/core/remote.ts'
+import { bastionPort, connectionId, fingerprints, pinHostKey, validateVia, viaLabel, RemoteError, sshConfig, validateRemote, writeRemoteFiles, type RemoteHost } from '../src/core/remote.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-code-remote-'))
 afterAll(() => { rmSync(root, { recursive: true, force: true }) })
@@ -21,6 +21,40 @@ function fakeKeyscan(lines: string): string {
   chmodSync(path, 0o700)
   return path
 }
+
+describe('Session Manager and Bastion paths', () => {
+  const ssm = { kind: 'aws-ssm', instanceId: 'i-0123456789abcdef0', region: 'eu-west-1' } as const
+  const vmId = '/subscriptions/00000000-0000-4000-8000-000000000000/resourceGroups/dsh-code/providers/Microsoft.Compute/virtualMachines/dsh-code-vm'
+  const bastion = { kind: 'azure-bastion', bastion: 'dsh-code-bastion', resourceGroup: 'dsh-code', vmId } as const
+
+  it('accepts real identifiers and refuses anything that could inject into the ProxyCommand line', () => {
+    expect(validateVia({ ...ssm, profile: 'work' })).toMatchObject({ profile: 'work' })
+    expect(viaLabel(validateVia(ssm))).toBe('i-0123456789abcdef0')
+    expect(viaLabel(validateVia(bastion))).toBe('dsh-code-vm')
+    for (const bad of [{ ...ssm, instanceId: 'i-123; rm -rf ~' }, { ...ssm, region: 'eu-west-1 --debug' }, { ...ssm, profile: 'a b' },
+      { ...bastion, vmId: `${vmId}; true` }, { ...bastion, bastion: '-x' }, { ...bastion, subscription: 'nope' }]) {
+      expect(() => validateVia(bad as never), JSON.stringify(bad)).toThrow(RemoteError)
+    }
+  })
+
+  it('writes the documented Session Manager ProxyCommand and names the VM by Code\'s alias in known_hosts', () => {
+    const config = sshConfig('/data/remote', { ...good, host: 'i-0123456789abcdef0', via: { ...ssm, profile: 'work' } }, { aws: '/usr/local/bin/aws' })
+    expect(config).toContain("ProxyCommand '/usr/local/bin/aws' ssm start-session --target i-0123456789abcdef0 --document-name AWS-StartSSHSession --parameters portNumber=%p --region eu-west-1 --profile work")
+    expect(config).toContain('HostKeyAlias dsh-code-remote')
+    expect(sshConfig('/data/remote', good)).not.toContain('ProxyCommand')
+  })
+
+  it('writes the Bastion helper and its settings, with a tunnel port from the connection id', () => {
+    const dir = join(root, 'bastion')
+    const remote = { ...good, host: 'dsh-code-vm', via: bastion }
+    writeRemoteFiles(dir, remote, { ssh: '/usr/bin/ssh', docker: 'docker', az: '/usr/local/bin/az', node: '/usr/local/bin/node' })
+    expect(readFileSync(join(dir, 'ssh_config'), 'utf8')).toContain(`ProxyCommand '/usr/local/bin/node' '${join(dir, 'bastion-proxy.mjs')}'`)
+    expect(JSON.parse(readFileSync(join(dir, 'bastion.json'), 'utf8'))).toMatchObject({ az: '/usr/local/bin/az', name: 'dsh-code-bastion', resourceGroup: 'dsh-code', vmId, resourcePort: 22, port: bastionPort(remote) })
+    expect(bastionPort(remote)).toBeGreaterThanOrEqual(40000)
+    expect(bastionPort(remote)).toBeLessThan(50000)
+    expect(statSync(join(dir, 'bastion.json')).mode & 0o077).toBe(0)
+  })
+})
 
 describe('remote Docker host settings', () => {
   it('accepts host names, IPs, logins, absolute key paths and SHA256 fingerprints', () => {

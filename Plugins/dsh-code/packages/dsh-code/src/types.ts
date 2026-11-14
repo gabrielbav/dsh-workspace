@@ -175,6 +175,18 @@ export interface CodeSettings {
   readonly remoteNetwork: 'public' | 'private'
   /** With a private network, the VM's public address, checked from here to be unreachable; optional. */
   readonly remotePublicHost: string
+  /** How SSH reaches the VM: its address, AWS Systems Manager Session Manager, or an Azure Bastion tunnel. */
+  readonly remoteVia: 'direct' | 'aws-ssm' | 'azure-bastion'
+  readonly remoteAwsInstanceId: string
+  readonly remoteAwsRegion: string
+  /** Optional named profile of the AWS CLI. */
+  readonly remoteAwsProfile: string
+  readonly remoteAzureBastion: string
+  readonly remoteAzureResourceGroup: string
+  /** `/subscriptions/…/resourceGroups/…/providers/Microsoft.Compute/virtualMachines/…` */
+  readonly remoteAzureVmId: string
+  /** Optional; the Azure CLI's current subscription otherwise. */
+  readonly remoteAzureSubscription: string
 }
 
 /** Where joining the remote VM to Tailscale stands. */
@@ -201,6 +213,8 @@ export interface CodeSettingsView {
   readonly reloaded?: boolean
   /** The last setup check logged in to the VM over a private network address. */
   readonly privateLoginOk?: boolean
+  /** Commands to close public SSH; present once a login over a private network, Session Manager or Bastion passed. */
+  readonly closePublic?: { readonly azure: readonly string[]; readonly aws: readonly string[] }
 }
 
 /** One account the host's gh CLI is signed in with, for Settings > Code. */

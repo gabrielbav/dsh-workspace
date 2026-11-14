@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { OWNER_LABEL } from '../../src/core/container-spec.ts'
 import { DockerCli, processRunner } from '../../src/core/docker.ts'
-import { pinHostKey, remoteShell, validateRemote, writeRemoteFiles } from '../../src/core/remote.ts'
+import { bastionPort, pinHostKey, remoteShell, validateRemote, writeRemoteFiles } from '../../src/core/remote.ts'
 import { WorkspaceManager, type WorkspaceRecord } from '../../src/core/workspaces.ts'
 import { DEFAULT_ALLOW } from '../../src/egress/policy.ts'
 import { relayConnection } from '../../src/host/preview.ts'
@@ -147,6 +147,40 @@ describe.runIf(enabled)('workspaces on a remote Docker host over SSH', () => {
     expect(report.checks.find(c => c.id === 'private-network')).toMatchObject({ ok: false })
     expect(report.checks.find(c => c.id === 'public-ssh')).toMatchObject({ ok: true, warning: true })
   }, 60_000)
+
+  it('reaches the VM through the Bastion helper and pins its key through the proxy', async () => {
+    // The tunnel az would open is a local forwarder on the same port; Code's helper and pinning run as they would.
+    const vmId = '/subscriptions/00000000-0000-4000-8000-000000000000/resourceGroups/rt/providers/Microsoft.Compute/virtualMachines/rt-vm'
+    const remote = validateRemote({ ...host!, host: 'rt-vm', via: { kind: 'azure-bastion', bastion: 'rt-bastion', resourceGroup: 'rt', vmId } })
+    const tunnel = createServer((client) => {
+      const upstream = connect(host!.port, host!.host)
+      client.pipe(upstream).pipe(client)
+      client.on('error', () => upstream.destroy())
+      upstream.on('error', () => client.destroy())
+    })
+    await new Promise<void>(r => tunnel.listen(bastionPort(remote), '127.0.0.1', r))
+    const dir = join(root, 'via-bastion')
+    try {
+      const dockerVia = writeRemoteFiles(dir, remote, { ssh: which('ssh'), docker: which('docker'), az: '/usr/bin/false', node: process.execPath })
+      await pinHostKey(dir, remote)
+      expect((await remoteShell(dir, 'echo via-bastion')).stdout.trim()).toBe('via-bastion')
+      expect((await new DockerCli(processRunner(dockerVia), dockerVia).runtimes())).toContain('runsc')
+      await expect(pinHostKey(dir, { ...remote, hostKey: 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' })).rejects.toMatchObject({ field: 'hostKey' })
+    } finally {
+      tunnel.close()
+    }
+  }, 120_000)
+
+  it('reaches the VM through the Session Manager ProxyCommand', async () => {
+    // A stand-in for `aws ssm start-session` that carries the SSH stream to the VM, as the plugin would.
+    const bin = join(root, 'fake-aws')
+    writeFileSync(bin, `#!/bin/sh\nexec nc ${host!.host} ${host!.port}\n`, { mode: 0o700 })
+    const remote = validateRemote({ ...host!, host: 'i-0123456789abcdef0', via: { kind: 'aws-ssm', instanceId: 'i-0123456789abcdef0', region: 'eu-west-1' } })
+    const dir = join(root, 'via-ssm')
+    writeRemoteFiles(dir, remote, { ssh: which('ssh'), docker: which('docker'), aws: bin })
+    await pinHostKey(dir, remote)
+    expect((await remoteShell(dir, 'echo via-ssm')).stdout.trim()).toBe('via-ssm')
+  }, 120_000)
 
   it('runs 30 commands in parallel through one SSH connection', async () => {
     const outputs = await Promise.all(Array.from({ length: 30 }, (_, i) => manager.runInside(w, ['sh', '-c', `echo ${i}`])))

@@ -46,7 +46,7 @@ az vm run-command invoke -g dsh-code -n dsh-code-vm --command-id RunShellScript 
 
 `--nsg-rule NONE` keeps `az vm create` from opening SSH to the whole internet; the next rule opens it to your address only. `az vm run-command` runs inside the VM through Azure itself, so the fingerprint it prints is the VM's own.
 
-Settings > Code > Remote Docker host:
+Settings > Code > Remote Docker host (**Connect via: SSH to an address**):
 
 | Field | Value |
 |---|---|
@@ -131,6 +131,48 @@ Grants are additive and the policy denies by default, so remove any broader rule
 Do not lock yourself out: Tailscale node keys expire. Disable key expiry for the VM in the admin console, and keep another way in before closing public SSH (the cloud's serial console, Azure Bastion, or AWS Session Manager).
 
 **WireGuard:** set it up on both ends yourself (it needs root on this computer, which Code does not have), then choose **Private network** and enter the VM's WireGuard address as Host. Code checks that the address is private and that the login works over it.
+
+## No open port: AWS Session Manager or Azure Bastion (optional)
+
+Settings > Code > Remote Docker host > **Connect via** chooses how SSH reaches the VM. Besides **SSH to an address**, two cloud paths need no inbound SSH port at all. Code still uses SSH with your key and the pinned host key inside them; it pins the key through the proxy before any login, so a wrong VM is refused the same way. Both use your own cloud CLI on this computer, logged in as it already is; Code never reads or stores its credentials. A remote session belongs to the VM's host key, so switching a VM between paths keeps its sessions.
+
+These paths follow each provider's documented SSH setup and are tested here with stand-ins for the cloud CLIs, not yet against AWS or Azure.
+
+### AWS Systems Manager Session Manager
+
+On this computer: the AWS CLI v2 and the [Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html), logged in with permission for `ssm:StartSession` on the instance and the `AWS-StartSSHSession` document.
+
+On the VM: the SSM agent (included in Ubuntu and Amazon Linux 2023 images on EC2) and an instance role with the `AmazonSSMManagedInstanceCore` policy. The security group needs **no inbound rule**.
+
+```sh
+aws iam create-role --role-name dsh-code-ssm --assume-role-policy-document \
+  '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam attach-role-policy --role-name dsh-code-ssm --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+aws iam create-instance-profile --instance-profile-name dsh-code-ssm
+aws iam add-role-to-instance-profile --instance-profile-name dsh-code-ssm --role-name dsh-code-ssm
+# then launch as in the AWS section, adding --iam-instance-profile Name=dsh-code-ssm and skipping the ingress rule
+```
+
+Settings: **Connect via: AWS Session Manager**, the instance ID (`i-…`), its region, an AWS CLI profile if you use one, the login (`ubuntu` or `ec2-user`), the key file and the fingerprint from the console output (as in the AWS section). Code connects with `aws ssm start-session --target <instance> --document-name AWS-StartSSHSession --parameters portNumber=22`, AWS's documented SSH-over-Session-Manager command.
+
+### Azure Bastion
+
+You need a Bastion of the **Standard** (or Premium) SKU with **native client support** (tunneling) in the VM's virtual network; the VM itself can have no public IP. Bastion is billed per hour while it exists.
+
+```sh
+az network vnet subnet create -g dsh-code --vnet-name dsh-code-vmVNET -n AzureBastionSubnet --address-prefixes 10.0.1.0/26
+az network public-ip create -g dsh-code -n dsh-code-bastion-ip --sku Standard
+az network bastion create -g dsh-code -n dsh-code-bastion --vnet-name dsh-code-vmVNET --public-ip-address dsh-code-bastion-ip --sku Standard --enable-tunneling true
+az vm show -g dsh-code -n dsh-code-vm --query id -o tsv     # the VM resource ID
+```
+
+The network and subnet names follow what `az vm create` makes by default (`<vm>VNET`); check yours with `az network vnet list -g dsh-code -o table`. To create the VM without a public IP, add `--public-ip-address ""` to `az vm create`.
+
+On this computer: the Azure CLI, logged in (`az login`). If it says the Bastion commands need an extension, install it with `az extension add --name bastion`.
+
+Settings: **Connect via: Azure Bastion**, the Bastion name, its resource group, the VM resource ID, the subscription ID if it is not your CLI's current one, the login (`azureuser`), the key file and the fingerprint (from `az vm run-command`, as in the Azure section). Code opens `az network bastion tunnel` to the VM's SSH port on a local port (40000–49999), carries SSH over it, and stops the tunnel with Code; its output goes to `<dataDir>/remote/bastion.log`.
+
+Once the setup notice shows the login works over Session Manager or Bastion, Settings shows the commands to close any public SSH rule left on the VM.
 
 ## Switching back
 

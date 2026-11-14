@@ -7,7 +7,7 @@ import { normalizeHost } from '../egress/policy.ts'
 import type { CodeSettings } from '../types.ts'
 import { environmentLines, EnvironmentError, parseEnvironment } from './environment.ts'
 import { unsafeFolderReason } from './mounts.ts'
-import { RemoteError, validateRemote } from './remote.ts'
+import { RemoteError, validateRemote, viaLabel, validateVia, type RemoteVia } from './remote.ts'
 
 /** Structured validation failure naming the field. */
 export class SettingsError extends Error {
@@ -57,12 +57,18 @@ export function validateSettings(input: CodeSettings): CodeSettings {
       throw new SettingsError('remotePublicHost', 'must be a host name or an IP address')
     }
   }
+  if (input.remoteVia !== 'direct' && input.remoteVia !== 'aws-ssm' && input.remoteVia !== 'azure-bastion') throw new SettingsError('remoteVia', 'must be direct, aws-ssm or azure-bastion')
+  for (const field of VIA_FIELDS) {
+    if (typeof input[field] !== 'string') throw new SettingsError(field, 'must be text')
+  }
   let remote = { host: '', port: typeof input.remotePort === 'number' ? input.remotePort : 22, user: input.remoteUser.trim(), identityFile: input.remoteIdentityFile.trim(), hostKey: input.remoteHostKey.trim() }
-  if (input.remoteHost.trim() !== '') {
+  const via = remoteViaOf(input)
+  if (remoteActive(input)) {
     try {
-      remote = validateRemote({ ...remote, host: input.remoteHost })
+      const validVia = validateVia(via)
+      remote = validateRemote({ ...remote, host: viaLabel(validVia) ?? input.remoteHost, via: validVia })
     } catch (error) {
-      if (error instanceof RemoteError) throw new SettingsError(REMOTE_FIELD_OF[error.field === 'connection' ? 'host' : error.field], error.message)
+      if (error instanceof RemoteError) throw new SettingsError(via.kind === 'direct' || error.field !== 'host' ? REMOTE_FIELD_OF[error.field === 'connection' ? 'host' : error.field] : 'remoteVia', error.message)
       throw error
     }
   }
@@ -127,6 +133,8 @@ export function validateSettings(input: CodeSettings): CodeSettings {
     storage: input.storage,
     remoteHost: remote.host, remotePort: remote.port, remoteUser: remote.user, remoteIdentityFile: remote.identityFile, remoteHostKey: remote.hostKey,
     remoteNetwork: input.remoteNetwork, remotePublicHost,
+    remoteVia: input.remoteVia,
+    ...Object.fromEntries(VIA_FIELDS.map(field => [field, input[field].trim()])) as Pick<CodeSettings, typeof VIA_FIELDS[number]>,
   }
 }
 
@@ -134,9 +142,34 @@ export function validateSettings(input: CodeSettings): CodeSettings {
 export const SETTINGS_FIELDS = ['network', 'allow', 'privateAllow', 'ports', 'cpus', 'memoryMb', 'pids', 'tmpMb', 'maxWorkspaces', 'workerImage', 'previewPorts', 'disabledAccounts', 'newBranch', 'shmMb', 'readOnlyWorkspace', 'dependencyCache', 'readOnlyFolders', 'environment', 'lockdown', 'previewEnabled', 'isolatedBrowser', 'storage'] as const satisfies ReadonlyArray<keyof CodeSettings>
 
 /** Remote Docker host fields: saved from Settings > Code, but changing them reloads Code instead of applying live. */
-export const REMOTE_FIELDS = ['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey', 'remoteNetwork', 'remotePublicHost'] as const satisfies ReadonlyArray<keyof CodeSettings>
+export const REMOTE_FIELDS = ['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey', 'remoteNetwork', 'remotePublicHost', 'remoteVia', 'remoteAwsInstanceId', 'remoteAwsRegion', 'remoteAwsProfile', 'remoteAzureBastion', 'remoteAzureResourceGroup', 'remoteAzureVmId', 'remoteAzureSubscription'] as const satisfies ReadonlyArray<keyof CodeSettings>
 
-const REMOTE_FIELD_OF = { host: 'remoteHost', port: 'remotePort', user: 'remoteUser', identityFile: 'remoteIdentityFile', hostKey: 'remoteHostKey' } as const
+const REMOTE_FIELD_OF = { host: 'remoteHost', port: 'remotePort', user: 'remoteUser', identityFile: 'remoteIdentityFile', hostKey: 'remoteHostKey', via: 'remoteVia' } as const
+
+/** Text fields of the Session Manager and Bastion paths. */
+const VIA_FIELDS = ['remoteAwsInstanceId', 'remoteAwsRegion', 'remoteAwsProfile', 'remoteAzureBastion', 'remoteAzureResourceGroup', 'remoteAzureVmId', 'remoteAzureSubscription'] as const
+
+/**
+ * The connection path the settings describe (not yet validated).
+ * @param s - remote settings.
+ * @returns the path.
+ */
+export function remoteViaOf(s: Pick<CodeSettings, 'remoteVia' | typeof VIA_FIELDS[number]>): RemoteVia {
+  if (s.remoteVia === 'aws-ssm') return { kind: 'aws-ssm', instanceId: s.remoteAwsInstanceId, region: s.remoteAwsRegion, profile: s.remoteAwsProfile }
+  if (s.remoteVia === 'azure-bastion') return { kind: 'azure-bastion', bastion: s.remoteAzureBastion, resourceGroup: s.remoteAzureResourceGroup, vmId: s.remoteAzureVmId, subscription: s.remoteAzureSubscription }
+  return { kind: 'direct' }
+}
+
+/**
+ * Whether the settings turn the remote Docker host on: a host for a direct path, an instance or VM for the others.
+ * @param s - remote settings.
+ * @returns true when sandboxes run on the VM.
+ */
+export function remoteActive(s: Pick<CodeSettings, 'remoteHost' | 'remoteVia' | 'remoteAwsInstanceId' | 'remoteAzureVmId'>): boolean {
+  if (s.remoteVia === 'aws-ssm') return s.remoteAwsInstanceId.trim() !== ''
+  if (s.remoteVia === 'azure-bastion') return s.remoteAzureVmId.trim() !== ''
+  return s.remoteHost.trim() !== ''
+}
 
 /**
  * Whether two configs differ only in live-applicable settings.
