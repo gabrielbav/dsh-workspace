@@ -19,7 +19,7 @@ const select: CSSProperties = {
   font: 'inherit', fontSize: 13, padding: '4px 8px', borderRadius: 8, maxWidth: 260,
   border: '1px solid var(--dsw-alias-border-default, rgba(127,127,127,.35))', background: 'transparent', color: 'inherit',
 }
-const note: CSSProperties = { fontSize: 12, opacity: 0.75, padding: '4px 2px' }
+const note: CSSProperties = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)', padding: '2px 0' }
 
 // ── Guided setup (conversation.input.dock) ─────────────────────────────────
 
@@ -128,7 +128,8 @@ export function WorkspaceStatusLine({ useView, usePresetIds, sessionId, t }: Inj
   if (view.status === 'pending') return null
   const text = statusText(view, t)
   if (text === undefined) return null
-  return <div style={note} role="status" aria-live="polite">{text}</div>
+  // The dock floats over the conversation, so the line has the page's own background.
+  return <div style={{ ...note, padding: '4px 10px', borderRadius: 8, background: 'var(--dsw-alias-bg-base)', justifySelf: 'start' }} role="status" aria-live="polite">{text}</div>
 }
 
 function statusText(view: CodeSessionView, t: T): string | undefined {
@@ -193,8 +194,8 @@ function ResourcesBody({ usage, t }: { readonly usage: () => Promise<Outcome<Wor
     [t('resources.disk'), formatBytes(value.diskBytes)],
   ]
   return (
-    <dl style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 16px', margin: 0, fontSize: 13 }}>
-      {rows.map(([label, text]) => [<dt key={`${label}-k`} style={{ opacity: 0.75 }}>{label}</dt>, <dd key={`${label}-v`} style={{ margin: 0 }}>{text}</dd>])}
+    <dl style={{ ...grid, gridTemplateColumns: 'auto 1fr' }}>
+      {rows.map(([label, text]) => [<dt key={`${label}-k`} style={term}>{label}</dt>, <dd key={`${label}-v`} style={{ margin: 0 }}>{text}</dd>])}
     </dl>
   )
 }
@@ -237,9 +238,13 @@ export function SessionActions({ useView, pendingWork, remove, t }: InjectFace<A
 
 // ── Environment (header dialog) ─────────────────────────────────────────────
 
-const grid: CSSProperties = { display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 16px', fontSize: 13, margin: 0 }
-const term: CSSProperties = { opacity: 0.65 }
-const value: CSSProperties = { margin: 0, fontFamily: 'var(--dsw-font-mono, ui-monospace, monospace)', overflowWrap: 'anywhere' }
+const grid: CSSProperties = { display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 16px', fontSize: 13, lineHeight: '20px', margin: 0 }
+const term: CSSProperties = { color: 'var(--dsw-alias-label-secondary)' }
+/** Identifiers (repository, branches, commits, hosts) in the monospace font at the body size; other values stay in the body font. */
+const value: CSSProperties = { margin: 0, fontFamily: 'var(--dsw-font-mono, ui-monospace, monospace)', fontSize: 12, overflowWrap: 'anywhere' }
+const plain: CSSProperties = { margin: 0, overflowWrap: 'anywhere' }
+/** Headings inside the Environment tab, the same as the Settings > Code group headings. */
+const tabHeading: CSSProperties = { margin: 0, fontSize: 14, lineHeight: '22px', fontWeight: 500 }
 
 /**
  * Where this Code session runs: account, repository, branches, container, network and limits, then the
@@ -275,15 +280,16 @@ function EnvironmentPanel({ load, status, side, t }: { readonly load: () => Prom
     ...options.storage === undefined ? [] : [`${t('env.storage')}: ${options.storage === 'volume' ? t('env.storage.volume') : t('env.storage.bind')}`],
     ...options.readOnlyFolders.length === 0 ? [] : [t('env.foldersCount', { count: String(options.readOnlyFolders.length) })],
   ].join(' · ')
-  const rows: [string, string | undefined][] = env.mode === 'host'
-    ? [[t('env.runs'), t('env.host')], [t('env.directory'), env.workingDirectory]]
+  // The third field marks identifiers, shown in the monospace font.
+  const rows: [string, string | undefined, boolean?][] = env.mode === 'host'
+    ? [[t('env.runs'), t('env.host')], [t('env.directory'), env.workingDirectory, true]]
     : [
       [t('env.runs'), t('env.code')],
-      [t('env.account'), env.account],
-      [t('env.repository'), env.repository],
-      [t('env.baseBranch'), env.baseBranch],
-      [t('env.baseCommit'), env.baseCommit?.slice(0, 12)],
-      [t('env.workingBranch'), env.workingBranch],
+      [t('env.account'), env.account, true],
+      [t('env.repository'), env.repository, true],
+      [t('env.baseBranch'), env.baseBranch, true],
+      [t('env.baseCommit'), env.baseCommit?.slice(0, 12), true],
+      [t('env.workingBranch'), env.workingBranch, true],
       [t('env.status'), env.status],
       [t('env.permission'), env.permission === undefined ? undefined : env.permission === 'read-only' ? t('env.permissionReadOnly') : env.permission === 'danger-full-access' ? t('env.permissionFullAccess') : t('env.permissionWrite')],
       [t('env.network'), env.network === undefined ? undefined : t('env.networkValue', { mode: env.network })],
@@ -293,10 +299,10 @@ function EnvironmentPanel({ load, status, side, t }: { readonly load: () => Prom
     <div style={{ display: 'grid', gap: 20 }}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 24, alignItems: 'start' }}>
       <dl style={grid}>
-        {rows.filter((row): row is [string, string] => row[1] !== undefined && row[1] !== '').map(([k, v]) => (
+        {rows.filter((row): row is [string, string, boolean?] => row[1] !== undefined && row[1] !== '').map(([k, v, mono]) => (
           <div key={k} style={{ display: 'contents' }}>
             <dt style={term}>{k}</dt>
-            <dd style={value}>{v}</dd>
+            <dd style={mono === true ? value : plain}>{v}</dd>
           </div>
         ))}
       </dl>
@@ -347,7 +353,7 @@ function ProvisionSteps({ steps, t }: { readonly steps: readonly ProvisionStep[]
   return (
     <section>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-        <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{t('env.steps', { when: new Date(start).toLocaleString() })}</h3>
+        <h3 style={tabHeading}>{t('env.steps', { when: new Date(start).toLocaleString() })}</h3>
         <span style={{ ...term, fontSize: 12 }}>{done ? t('step.total', { total: seconds(total) }) : t('step.running')}</span>
       </div>
       <div style={{ position: 'relative', height: 10, marginBottom: 10, background: 'var(--dsw-alias-bg-subtle, rgba(127,127,127,.12))', borderRadius: 2 }}>
@@ -417,8 +423,8 @@ function RestrictSsh({ remoteAddress, detectAddress, saved, t }: { readonly remo
     })
   }
   return (
-    <details style={{ display: 'grid', gap: 8 }}>
-      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>{t('remote.restrict')}</summary>
+    <details style={{ padding: '12px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.25))' }}>
+      <summary style={{ cursor: 'pointer', fontSize: 14, lineHeight: '20px' }}>{t('remote.restrict')}</summary>
       <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
         <div style={note}>{t('remote.restrictHint')}</div>
         <div style={row}>
@@ -458,8 +464,8 @@ function TailscaleJoinPanel({ join, status, onUse, saved, t }: { readonly join: 
     return () => { clearInterval(timer) }
   }, [active, status])
   return (
-    <details style={{ display: 'grid', gap: 8 }}>
-      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>{t('remote.tailscale')}</summary>
+    <details style={{ padding: '12px 0', borderBottom: '0.5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.25))' }}>
+      <summary style={{ cursor: 'pointer', fontSize: 14, lineHeight: '20px' }}>{t('remote.tailscale')}</summary>
       <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
         <div style={note}>{t('remote.tailscaleHint')}</div>
         <div style={row}>
@@ -531,6 +537,56 @@ export function fromDraft(draft: Draft): CodeSettings {
   }
 }
 
+/** Type and spacing of Settings > Code, matching the Harness's own settings pages. */
+const text = {
+  title: { margin: 0, fontSize: 16, lineHeight: '24px', fontWeight: 500 },
+  intro: { margin: 0, fontSize: 14, lineHeight: '22px', color: 'var(--dsw-alias-label-tertiary)' },
+  heading: { margin: 0, fontSize: 14, lineHeight: '22px', fontWeight: 500 },
+  label: { fontSize: 14, lineHeight: '20px' },
+  hint: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
+} satisfies Record<string, CSSProperties>
+const divider = '0.5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.25))'
+const warnColor = 'var(--dsw-alias-state-warn-label, #b26b00)'
+const monoFont = 'var(--dsw-font-mono, ui-monospace, monospace)'
+const textArea: CSSProperties = { ...select, maxWidth: 'none', width: '100%', boxSizing: 'border-box', fontFamily: monoFont, fontSize: 12, lineHeight: '18px', padding: '6px 8px', resize: 'vertical' }
+
+type TextKey = Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'remoteNetwork' | 'remoteVia' | 'readOnlyFolders' | 'environment'>
+
+/** One group of settings: a heading, an optional line under it, and its rows. */
+function SettingsGroup({ title, hint, children }: { readonly title: string; readonly hint?: string; readonly children: ReactNode }): ReactNode {
+  return (
+    <section aria-label={title} style={{ display: 'grid' }}>
+      <h3 style={text.heading}>{title}</h3>
+      {hint !== undefined && <p style={{ ...text.hint, marginTop: 4 }}>{hint}</p>}
+      <div style={{ display: 'grid', marginTop: 4, borderTop: divider }}>{children}</div>
+    </section>
+  )
+}
+
+/** A setting with its control on the right: switches. */
+function SettingRow({ label, hint, children }: { readonly label: string; readonly hint?: string; readonly children: ReactNode }): ReactNode {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24, padding: '12px 0', borderBottom: divider }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={text.label}>{label}</div>
+        {hint !== undefined && <p style={{ ...text.hint, marginTop: 4 }}>{hint}</p>}
+      </div>
+      <div style={{ flex: 'none' }}>{children}</div>
+    </div>
+  )
+}
+
+/** A setting with its control below the label: text, lists and choices. */
+function SettingBlock({ label, hint, children }: { readonly label: string; readonly hint?: string; readonly children: ReactNode }): ReactNode {
+  return (
+    <div style={{ display: 'grid', gap: 8, padding: '12px 0', borderBottom: divider, minWidth: 0 }}>
+      <div style={text.label}>{label}</div>
+      {children}
+      {hint !== undefined && <p style={text.hint}>{hint}</p>}
+    </div>
+  )
+}
+
 /**
  * Settings > Code: network policy, resource limits, worker image and preview ports.
  * @param props - injected load/save and translator.
@@ -568,30 +624,40 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
   const remoteOn = draft.remoteVia === 'aws-ssm' ? draft.remoteAwsInstanceId.trim() !== '' : draft.remoteVia === 'azure-bastion' ? draft.remoteAzureVmId.trim() !== '' : draft.remoteHost.trim() !== ''
   const current = fromDraft(draft)
   const savedRemote = saved !== null && remoteOn && (['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey', 'remoteVia', 'remoteAwsInstanceId', 'remoteAwsRegion', 'remoteAwsProfile', 'remoteAzureBastion', 'remoteAzureResourceGroup', 'remoteAzureVmId', 'remoteAzureSubscription'] as const).every(key => saved[key] === current[key])
-  const field = (key: Exclude<keyof Draft, 'network' | 'allow' | 'privateAllow' | 'disabledAccounts' | 'newBranch' | 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'storage' | 'remoteNetwork' | 'remoteVia' | 'readOnlyFolders' | 'environment'>, type: 'text' | 'number' = 'text'): ReactNode => (
-    <label style={{ display: 'grid', gap: 4 }}>
-      <span style={note}>{t(`settings.${key}`)}</span>
-      <Input aria-label={t(`settings.${key}`)} type={type} value={draft[key]} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
+  const textKeys = (key: TextKey): ReactNode => (
+    <Input aria-label={t(`settings.${key}`)} type={key === 'remotePort' ? 'number' : 'text'} value={draft[key]} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
+  )
+  const field = (key: TextKey, hint?: string): ReactNode => (
+    <SettingBlock label={t(`settings.${key}`)} hint={hint}>{textKeys(key)}</SettingBlock>
+  )
+  const numberCell = (key: TextKey): ReactNode => (
+    <label key={key} style={{ display: 'grid', gap: 4, minWidth: 0 }}>
+      <span style={text.hint}>{t(`settings.${key}`)}</span>
+      <Input aria-label={t(`settings.${key}`)} type="number" value={draft[key]} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
     </label>
   )
-  const toggle = (key: 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser', hint: string): ReactNode => (
-    <div style={{ display: 'grid', gap: 2, maxWidth: 560 }}>
-      <div style={{ ...row, justifyContent: 'space-between' }}>
-        <span>{t(`settings.${key}`)}</span>
-        <Switch label={t(`settings.${key}`)} checked={draft[key]} onChange={(on) => { setDraft({ ...draft, [key]: on }) }} />
-      </div>
-      <div style={note}>{hint}</div>
-    </div>
+  const switchRow = (key: 'readOnlyWorkspace' | 'dependencyCache' | 'lockdown' | 'previewEnabled' | 'isolatedBrowser' | 'newBranch', label: string, hint: string): ReactNode => (
+    <SettingRow label={label} hint={hint}>
+      <Switch label={label} checked={draft[key]} onChange={(on) => { setDraft({ ...draft, [key]: on }) }} />
+    </SettingRow>
   )
-  const area = (key: 'allow' | 'privateAllow' | 'readOnlyFolders' | 'environment'): ReactNode => (
-    <label style={{ display: 'grid', gap: 4 }}>
-      <span style={note}>{t(`settings.${key}`)}</span>
-      <textarea aria-label={t(`settings.${key}`)} rows={6} value={draft[key]} style={{ ...select, maxWidth: 'none', fontFamily: 'monospace' }} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
-    </label>
+  const area = (key: 'allow' | 'privateAllow' | 'readOnlyFolders' | 'environment', hint?: string, extra?: ReactNode): ReactNode => (
+    <SettingBlock label={t(`settings.${key}`)} hint={hint}>
+      <textarea aria-label={t(`settings.${key}`)} rows={key === 'allow' ? 6 : 3} value={draft[key]} style={textArea} onChange={(event) => { setDraft({ ...draft, [key]: event.target.value }) }} />
+      {extra}
+    </SettingBlock>
+  )
+  const remoteLogin = (
+    <>
+      {field('remotePort')}
+      {field('remoteUser')}
+      {field('remoteIdentityFile')}
+      {field('remoteHostKey', t('settings.remoteSaveHint'))}
+    </>
   )
   return (
     <form
-      style={{ display: 'grid', gap: 16, maxWidth: 640 }}
+      style={{ display: 'grid', gap: 28, maxWidth: 720 }}
       onSubmit={(event) => {
         event.preventDefault()
         setBusy(true)
@@ -603,153 +669,146 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
         })
       }}
     >
-      <h2 style={{ margin: 0, fontSize: 16 }}>{t('settings.title')}</h2>
-      {!writable && <div style={note} role="note">{t('settings.notWritable')}</div>}
-      {toggle('lockdown', t('settings.lockdownHint'))}
-      {draft.lockdown && <div style={note} role="note">{t('settings.lockdownActive')}</div>}
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.network')}</legend>
-        <SegmentedControl<CodeSettings['network']>
-          id="dsh-code-network"
-          label={t('settings.network')}
-          value={draft.network}
-          onChange={(network) => { setDraft({ ...draft, network }) }}
-          options={[
-            { value: 'allowlist', label: t('settings.network.allowlist') },
-            { value: 'none', label: t('settings.network.none') },
-            { value: 'open', label: t('settings.network.open') },
-          ]}
-        />
-        {draft.network === 'open' && <div style={note} role="alert">{t('settings.network.openWarning')}</div>}
+      <header style={{ display: 'grid', gap: 4 }}>
+        <h2 style={text.title}>{t('settings.title')}</h2>
+        <p style={text.intro}>{t('settings.intro')}</p>
+        {!writable && <p style={{ ...text.hint, color: warnColor }} role="note">{t('settings.notWritable')}</p>}
+      </header>
+
+      <SettingsGroup title={t('settings.group.protection')}>
+        {switchRow('lockdown', t('settings.lockdown'), t('settings.lockdownHint'))}
+        {draft.lockdown && <p style={{ ...text.hint, color: warnColor, padding: '12px 0', borderBottom: divider }} role="note">{t('settings.lockdownActive')}</p>}
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.group.github')}>
+        <SettingBlock label={t('settings.accounts')} hint={t('settings.accountsHint')}>
+          {accountsError !== null && <p style={{ ...text.hint, color: warnColor }} role="alert">{t('error.generic', { error: accountsError })}</p>}
+          {logins === null && accountsError === null && <p style={text.hint}>{t('picker.loading')}</p>}
+          {logins?.length === 0 && <p style={text.hint}>{t('settings.noAccounts')}</p>}
+          {logins !== null && logins.length > 0 && (
+            <div style={{ display: 'grid', gap: 6 }}>
+              {logins.map(({ login }) => (
+                <div key={login} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24 }}>
+                  <span style={text.label}>{login}</span>
+                  <Switch
+                    label={t('settings.accountToggle', { login })}
+                    checked={!draft.disabledAccounts.includes(login)}
+                    onChange={(on) => {
+                      const rest = draft.disabledAccounts.filter(l => l !== login)
+                      setDraft({ ...draft, disabledAccounts: on ? rest : [...rest, login] })
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </SettingBlock>
+        {switchRow('newBranch', t('settings.newBranch'), draft.newBranch ? t('settings.newBranchOn') : t('settings.newBranchOff'))}
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.network')}>
+        <SettingBlock label={t('settings.networkMode')} hint={draft.network === 'open' ? undefined : t('settings.networkModeHint')}>
+          <SegmentedControl<CodeSettings['network']>
+            id="dsh-code-network"
+            label={t('settings.networkMode')}
+            value={draft.network}
+            onChange={(network) => { setDraft({ ...draft, network }) }}
+            options={[
+              { value: 'allowlist', label: t('settings.network.allowlist') },
+              { value: 'none', label: t('settings.network.none') },
+              { value: 'open', label: t('settings.network.open') },
+            ]}
+          />
+          {draft.network === 'open' && <p style={{ ...text.hint, color: warnColor }} role="alert">{t('settings.network.openWarning')}</p>}
+        </SettingBlock>
         {area('allow')}
         {area('privateAllow')}
         {field('ports')}
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8, gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.limits')}</legend>
-        {field('cpus', 'number')}
-        {field('memoryMb', 'number')}
-        {field('pids', 'number')}
-        {field('tmpMb', 'number')}
-        {field('maxWorkspaces', 'number')}
-        {field('shmMb', 'number')}
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.storage')}</legend>
-        <SegmentedControl<CodeSettings['storage']>
-          id="dsh-code-storage"
-          label={t('settings.storage')}
-          value={draft.storage}
-          onChange={(storage) => { setDraft({ ...draft, storage }) }}
-          options={[
-            { value: 'auto', label: t('settings.storage.auto') },
-            { value: 'bind', label: t('settings.storage.bind') },
-            { value: 'volume', label: t('settings.storage.volume') },
-          ]}
-        />
-        <div style={note}>{t('settings.storageHint')}</div>
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 10 }} disabled={draft.lockdown}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.workspace')}</legend>
-        {toggle('readOnlyWorkspace', t('settings.readOnlyWorkspaceHint'))}
-        {toggle('dependencyCache', t('settings.dependencyCacheHint'))}
-        {area('readOnlyFolders')}
-        {pickFolder !== undefined && (
-          <div style={row}>
-            <Button
-              size="sm"
-              variant="outline"
-              type="button"
-              onClick={() => {
-                void pickFolder().then((folder) => {
-                  if (folder === null || folder === '') return
-                  const current = draft.readOnlyFolders.split('\n').map(x => x.trim()).filter(x => x !== '')
-                  if (!current.includes(folder)) setDraft({ ...draft, readOnlyFolders: [...current, folder].join('\n') })
-                })
-              }}
-            >
-              {t('settings.addFolder')}
-            </Button>
-          </div>
-        )}
-        <div style={note} role="note">{t('settings.readOnlyFoldersHint')}</div>
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 6 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.variables')}</legend>
-        {area('environment')}
-        <div style={note}>{t('settings.environmentHint')}</div>
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.accounts')}</legend>
-        <div style={note}>{t('settings.accountsHint')}</div>
-        {accountsError !== null && <div style={note} role="alert">{t('error.generic', { error: accountsError })}</div>}
-        {logins === null && accountsError === null && <div style={note}>{t('picker.loading')}</div>}
-        {logins?.length === 0 && <div style={note}>{t('settings.noAccounts')}</div>}
-        {logins?.map(({ login }) => (
-          <div key={login} style={{ ...row, justifyContent: 'space-between', maxWidth: 420 }}>
-            <span>{login}</span>
-            <Switch
-              label={t('settings.accountToggle', { login })}
-              checked={!draft.disabledAccounts.includes(login)}
-              onChange={(on) => {
-                const rest = draft.disabledAccounts.filter(l => l !== login)
-                setDraft({ ...draft, disabledAccounts: on ? rest : [...rest, login] })
-              }}
-            />
-          </div>
-        ))}
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.branches')}</legend>
-        <div style={{ ...row, justifyContent: 'space-between', maxWidth: 420 }}>
-          <span>{t('settings.newBranch')}</span>
-          <Switch label={t('settings.newBranch')} checked={draft.newBranch} onChange={(newBranch) => { setDraft({ ...draft, newBranch }) }} />
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.workspace')}>
+        <SettingBlock label={t('settings.storage')} hint={t('settings.storageHint')}>
+          <SegmentedControl<CodeSettings['storage']>
+            id="dsh-code-storage"
+            label={t('settings.storage')}
+            value={draft.storage}
+            onChange={(storage) => { setDraft({ ...draft, storage }) }}
+            options={[
+              { value: 'auto', label: t('settings.storage.auto') },
+              { value: 'bind', label: t('settings.storage.bind') },
+              { value: 'volume', label: t('settings.storage.volume') },
+            ]}
+          />
+        </SettingBlock>
+        <fieldset disabled={draft.lockdown} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, opacity: draft.lockdown ? 0.55 : 1 }}>
+          {switchRow('readOnlyWorkspace', t('settings.readOnlyWorkspace'), t('settings.readOnlyWorkspaceHint'))}
+          {switchRow('dependencyCache', t('settings.dependencyCache'), t('settings.dependencyCacheHint'))}
+          {area('readOnlyFolders', t('settings.readOnlyFoldersHint'), pickFolder === undefined ? undefined : (
+            <div>
+              <Button
+                size="sm"
+                variant="outline"
+                type="button"
+                onClick={() => {
+                  void pickFolder().then((folder) => {
+                    if (folder === null || folder === '') return
+                    const listed = draft.readOnlyFolders.split('\n').map(x => x.trim()).filter(x => x !== '')
+                    if (!listed.includes(folder)) setDraft({ ...draft, readOnlyFolders: [...listed, folder].join('\n') })
+                  })
+                }}
+              >
+                {t('settings.addFolder')}
+              </Button>
+            </div>
+          ))}
+        </fieldset>
+        {area('environment', t('settings.environmentHint'))}
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.preview')}>
+        {switchRow('previewEnabled', t('settings.previewEnabled'), t('settings.previewEnabledHint'))}
+        {draft.previewEnabled && switchRow('isolatedBrowser', t('settings.isolatedBrowser'), t('settings.isolatedBrowserHint'))}
+        {field('previewPorts')}
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.limits')} hint={t('settings.limitsHint')}>
+        <div style={{ display: 'grid', gap: 12, gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', padding: '12px 0', borderBottom: divider }}>
+          {(['cpus', 'memoryMb', 'pids', 'tmpMb', 'shmMb', 'maxWorkspaces'] as const).map(numberCell)}
         </div>
-        <div style={note}>{draft.newBranch ? t('settings.newBranchOn') : t('settings.newBranchOff')}</div>
-      </fieldset>
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.remote')}</legend>
-        <div style={note}>{t('settings.remoteHint')}</div>
-        <SegmentedControl<CodeSettings['remoteVia']>
-          id="dsh-code-remote-via"
-          label={t('settings.remoteVia')}
-          value={draft.remoteVia}
-          onChange={(remoteVia) => { setDraft({ ...draft, remoteVia }) }}
-          options={[
-            { value: 'direct', label: t('settings.remoteVia.direct') },
-            { value: 'aws-ssm', label: t('settings.remoteVia.awsSsm') },
-            { value: 'azure-bastion', label: t('settings.remoteVia.azureBastion') },
-          ]}
-        />
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.group.where')} hint={t('settings.remoteHint')}>
+        <SettingBlock label={t('settings.remoteVia')}>
+          <SegmentedControl<CodeSettings['remoteVia']>
+            id="dsh-code-remote-via"
+            label={t('settings.remoteVia')}
+            value={draft.remoteVia}
+            onChange={(remoteVia) => { setDraft({ ...draft, remoteVia }) }}
+            options={[
+              { value: 'direct', label: t('settings.remoteVia.direct') },
+              { value: 'aws-ssm', label: t('settings.remoteVia.awsSsm') },
+              { value: 'azure-bastion', label: t('settings.remoteVia.azureBastion') },
+            ]}
+          />
+        </SettingBlock>
         {draft.remoteVia === 'direct' && field('remoteHost')}
         {draft.remoteVia === 'aws-ssm' && (
           <>
-            <div style={note}>{t('settings.remoteVia.awsSsmHint')}</div>
-            {field('remoteAwsInstanceId')}
+            {field('remoteAwsInstanceId', t('settings.remoteVia.awsSsmHint'))}
             {field('remoteAwsRegion')}
             {field('remoteAwsProfile')}
           </>
         )}
         {draft.remoteVia === 'azure-bastion' && (
           <>
-            <div style={note}>{t('settings.remoteVia.azureBastionHint')}</div>
-            {field('remoteAzureBastion')}
+            {field('remoteAzureBastion', t('settings.remoteVia.azureBastionHint'))}
             {field('remoteAzureResourceGroup')}
             {field('remoteAzureVmId')}
             {field('remoteAzureSubscription')}
           </>
         )}
-        {remoteOn && draft.remoteVia !== 'direct' && (
-          <>
-            {field('remotePort', 'number')}
-            {field('remoteUser')}
-            {field('remoteIdentityFile')}
-            {field('remoteHostKey')}
-            <div style={note}>{t('settings.remoteSaveHint')}</div>
-          </>
-        )}
         {remoteOn && draft.remoteVia === 'direct' && (
-          <>
+          <SettingBlock label={t('settings.remoteNetwork')} hint={draft.remoteNetwork === 'private' ? t('settings.remoteNetwork.privateHint') : t('settings.remoteNetwork.publicHint')}>
             <SegmentedControl<CodeSettings['remoteNetwork']>
               id="dsh-code-remote-network"
               label={t('settings.remoteNetwork')}
@@ -760,13 +819,12 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
                 { value: 'private', label: t('settings.remoteNetwork.private') },
               ]}
             />
-            <div style={note}>{draft.remoteNetwork === 'private' ? t('settings.remoteNetwork.privateHint') : t('settings.remoteNetwork.publicHint')}</div>
-            {field('remotePort', 'number')}
-            {field('remoteUser')}
-            {field('remoteIdentityFile')}
-            {field('remoteHostKey')}
-            {draft.remoteNetwork === 'private' && field('remotePublicHost')}
-            <div style={note}>{t('settings.remoteSaveHint')}</div>
+          </SettingBlock>
+        )}
+        {remoteOn && remoteLogin}
+        {remoteOn && draft.remoteVia === 'direct' && draft.remoteNetwork === 'private' && field('remotePublicHost')}
+        {remoteOn && draft.remoteVia === 'direct' && (
+          <div style={{ display: 'grid', gap: 0 }}>
             <RestrictSsh remoteAddress={remoteAddress} detectAddress={detectAddress} saved={savedRemote} t={t} />
             {draft.remoteNetwork === 'public' && (
               <TailscaleJoinPanel
@@ -777,27 +835,25 @@ export function CodeSettingsSection({ load, save, accounts, pickFolder, remoteAd
                 t={t}
               />
             )}
-          </>
-        )}
-        {remoteOn && closePublic !== null && closePublic !== undefined && savedRemote && (
-          <div style={{ display: 'grid', gap: 8 }}>
-            <div style={note}>{t('remote.closeHint')}</div>
-            <CommandBlock title={t('remote.azureClose')} lines={closePublic.azure} t={t} />
-            <CommandBlock title={t('remote.awsClose')} lines={closePublic.aws} t={t} />
           </div>
         )}
-      </fieldset>
-      {field('workerImage')}
-      <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'grid', gap: 8 }}>
-        <legend style={{ fontWeight: 600, marginBottom: 4 }}>{t('settings.preview')}</legend>
-        {toggle('previewEnabled', t('settings.previewEnabledHint'))}
-        {draft.previewEnabled && toggle('isolatedBrowser', t('settings.isolatedBrowserHint'))}
-        {field('previewPorts')}
-      </fieldset>
-      <div style={row}>
+        {remoteOn && closePublic !== null && closePublic !== undefined && savedRemote && (
+          <SettingBlock label={t('remote.closeTitle')} hint={t('remote.closeHint')}>
+            <CommandBlock title={t('remote.azureClose')} lines={closePublic.azure} t={t} />
+            <CommandBlock title={t('remote.awsClose')} lines={closePublic.aws} t={t} />
+          </SettingBlock>
+        )}
+      </SettingsGroup>
+
+      <SettingsGroup title={t('settings.group.advanced')}>
+        {field('workerImage', t('settings.workerImageHint'))}
+      </SettingsGroup>
+
+      {/* Pinned to the bottom of the dialog, so Save is reachable from every group of a long page. */}
+      <footer style={{ position: 'sticky', bottom: -24, zIndex: 1, display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0 36px', marginTop: -16, marginBottom: -24, borderTop: divider, background: 'var(--dsw-alias-bg-layer-2)' }}>
         <Button type="submit" variant="primary" disabled={busy}>{t('settings.save')}</Button>
-        {message !== null && <span style={note} role="status" aria-live="polite">{message}</span>}
-      </div>
+        {message !== null && <p style={text.hint} role="status" aria-live="polite">{message}</p>}
+      </footer>
     </form>
   )
 }
@@ -857,9 +913,9 @@ function SessionOverridesEditor({ load, save, t }: { readonly load: () => Promis
   const choice = view.overrides.preview === undefined ? 'default' : view.overrides.preview ? 'on' : 'off'
   return (
     <section style={{ display: 'grid', gap: 8, maxWidth: 560 }}>
-      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{t('env.sessionOptions')}</h3>
+      <h3 style={tabHeading}>{t('env.sessionOptions')}</h3>
       <div style={{ ...row, justifyContent: 'space-between' }}>
-        <span>{t('env.previewForSession')}</span>
+        <span style={{ fontSize: 13, lineHeight: '20px' }}>{t('env.previewForSession')}</span>
         <SegmentedControl<'default' | 'on' | 'off'>
           id="dsh-code-session-preview"
           label={t('env.previewForSession')}
@@ -880,7 +936,7 @@ function SessionOverridesEditor({ load, save, t }: { readonly load: () => Promis
       </div>
       {view.effective.preview && (
         <div style={{ ...row, justifyContent: 'space-between' }}>
-          <span>{t('env.isolatedForSession')}</span>
+          <span style={{ fontSize: 13, lineHeight: '20px' }}>{t('env.isolatedForSession')}</span>
           {view.lockdown
             ? <span style={note}>{t('env.isolatedByLockdown')}</span>
             : (
@@ -928,7 +984,7 @@ function SessionVariablesEditor({ variables, save, t }: { readonly variables: ()
   }, [variables, t])
   return (
     <section style={{ display: 'grid', gap: 8 }}>
-      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{t('env.variables')}</h3>
+      <h3 style={tabHeading}>{t('env.variables')}</h3>
       {loaded !== null && loaded.defaults.length > 0 && (
         <div style={note}>
           {t('env.variablesDefaults')}
@@ -981,7 +1037,7 @@ function NetworkGrantsList({ load, revoke, t }: { readonly load: () => Promise<O
   }, [load, t])
   return (
     <section style={{ display: 'grid', gap: 8 }}>
-      <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{t('env.approvedHosts')}</h3>
+      <h3 style={tabHeading}>{t('env.approvedHosts')}</h3>
       {hosts !== null && hosts.length === 0 && <div style={note}>{t('env.approvedHostsNone')}</div>}
       {hosts !== null && hosts.map(host => (
         <div key={host} style={row}>
@@ -1023,7 +1079,7 @@ export function EnvironmentTab({ useView, usePresetIds, sessionId, load, usage, 
           status={`${status}:${view?.repository ?? ''}:${view?.baseBranch ?? ''}:${String(codeMode)}`}
           side={view !== null && view.status !== 'pending' ? (
             <section>
-              <h3 style={{ margin: '0 0 8px', fontSize: 13, fontWeight: 600 }}>{t('resources.title')}</h3>
+              <h3 style={{ ...tabHeading, marginBottom: 8 }}>{t('resources.title')}</h3>
               <ResourcesBody usage={usage} t={t} />
             </section>
           ) : undefined}

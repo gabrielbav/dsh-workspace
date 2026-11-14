@@ -9,6 +9,12 @@ import { allowOnlyCommands, closePublicCommands, detectPublicAddress, isPrivateA
 import { parseJoinedAddress, parseLoginUrl, TAILSCALE_JOIN_SCRIPT, TailscaleJoin } from '../src/core/tailscale.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-code-net-'))
+
+/** Wait until a condition holds (process start-up is slower on a busy machine). */
+async function until(check: () => boolean, timeoutMs = 10_000): Promise<void> {
+  const end = Date.now() + timeoutMs
+  while (!check() && Date.now() < end) await new Promise(r => setTimeout(r, 50))
+}
 const servers: Server[] = []
 afterAll(() => { for (const s of servers) s.close(); rmSync(root, { recursive: true, force: true }) })
 
@@ -84,9 +90,9 @@ describe('joining the VM to Tailscale', () => {
     chmodSync(fake, 0o700)
     const join_ = new TailscaleJoin(() => [fake])
     expect(join_.start().state).toBe('installing')
-    await new Promise(r => setTimeout(r, 500))
+    await until(() => join_.status().state !== 'installing')
     expect(join_.status()).toMatchObject({ state: 'waiting-for-login', loginUrl: 'https://login.tailscale.com/a/1a2b3c4d' })
-    await new Promise(r => setTimeout(r, 1500))
+    await until(() => join_.status().state === 'joined')
     expect(join_.status()).toEqual({ state: 'joined', address: '100.101.1.2' })
   })
 
@@ -96,7 +102,7 @@ describe('joining the VM to Tailscale', () => {
     chmodSync(fake, 0o700)
     const failing = new TailscaleJoin(() => [fake])
     failing.start()
-    await new Promise(r => setTimeout(r, 500))
+    await until(() => failing.status().state === 'failed')
     expect(failing.status().state).toBe('failed')
     expect(failing.status().error).toContain('a password is required')
     expect(failing.status().error).not.toContain('secret1')
@@ -105,7 +111,7 @@ describe('joining the VM to Tailscale', () => {
     chmodSync(slow, 0o700)
     const waiting = new TailscaleJoin(() => [slow], 300)
     waiting.start()
-    await new Promise(r => setTimeout(r, 600))
+    await until(() => waiting.status().state === 'failed', 3000)
     expect(waiting.status()).toMatchObject({ state: 'failed' })
   })
 })
