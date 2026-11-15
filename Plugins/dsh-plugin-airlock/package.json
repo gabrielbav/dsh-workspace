@@ -1,0 +1,90 @@
+{
+  "name": "dsh-plugin-airlock",
+  "version": "0.2.0",
+  "description": "Security score for every DeepSeek Harness plugin, skill and subagent: quarantine, six security scanners and an optional LLM judge check each package before it installs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gabrielbav/dsh-plugin-airlock.git"
+  },
+  "homepage": "https://github.com/gabrielbav/dsh-plugin-airlock#readme",
+  "bugs": {
+    "url": "https://github.com/gabrielbav/dsh-plugin-airlock/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "security",
+    "ai-security",
+    "agent-security",
+    "llm-security",
+    "prompt-injection",
+    "supply-chain-security",
+    "skills",
+    "mcp",
+    "mcp-security",
+    "sarif",
+    "gitleaks",
+    "trivy",
+    "osv-scanner",
+    "skill-scanner",
+    "quarantine"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/host/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/host/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown && node scripts/wrap-client.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm build && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "~18.3.1",
+    "execa": "^10.0.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11",
+    "yaml": "^2.9.0"
+  },
+  "icon": "./icon.svg"
+}
