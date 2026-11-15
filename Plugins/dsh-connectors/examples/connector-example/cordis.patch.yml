@@ -1,0 +1,5 @@
+# Mounts the connector after the connectors service it registers with.
+- insert:
+    - id: connector-example
+      name: "@gabrielbav/dsh-connector-example"
+      inject: [connectors]

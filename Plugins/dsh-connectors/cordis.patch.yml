@@ -1,0 +1,7 @@
+# Mounts the Host half when the bundle is installed into a profile. It starts after the MCP manager and the
+# credentials store it uses. The browser half (the Connectors settings page) is discovered from the `dsh.client`
+# declaration in package.json.
+- insert:
+    - id: connectors
+      name: "@gabrielbav/dsh-connectors"
+      inject: [credentials, mcpManager]

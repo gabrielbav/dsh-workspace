@@ -1,0 +1,17 @@
+{
+  "name": "@gabrielbav/dsh-connector-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference connector package: adds an Example connector through the dsh-connectors service",
+  "keywords": ["dsh-connector"],
+  "type": "module",
+  "main": "lib/index.js",
+  "files": ["lib", "cordis.patch.yml"],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "connector": { "ids": ["example"] }
+  },
+  "peerDependencies": {
+    "@gabrielbav/dsh-connectors": ">=0.2.0"
+  }
+}
