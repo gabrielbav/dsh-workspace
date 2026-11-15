@@ -2,13 +2,13 @@
 
 Adds a **Connectors** page to Settings, like the connectors page in Claude. Each connector adds an MCP server to DSH, so every session in that dsh (chats, subagents, automation tasks) can use its tools, named `mcp__<connector>__<tool>`. The page lists the connectors in a table (**Connector**, **Type**, **Authorization**, **Status**) with a search field, and an **Add** menu for your own.
 
-![The Connectors page in DSH Settings: Granola, Linear and Jira & Confluence connected, the other connectors ready to connect](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/connectors.png)
+![The Connectors page in DSH Settings: Granola, Linear and Jira & Confluence connected, the other connectors ready to connect](https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-connectors/docs/screenshots/connectors.png)
 
 | Add a connector | Custom MCP server | Token sign-in |
 |---|---|---|
-| ![Add menu: custom connector or npm package](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/add-menu.png) | ![Add a custom connector dialog with a name and an MCP URL](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/custom-connector.png) | ![Connect Azure DevOps dialog with organization and personal access token](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/token-dialog.png) |
+| ![Add menu: custom connector or npm package](https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-connectors/docs/screenshots/add-menu.png) | ![Add a custom connector dialog with a name and an MCP URL](https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-connectors/docs/screenshots/custom-connector.png) | ![Connect Azure DevOps dialog with organization and personal access token](https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-connectors/docs/screenshots/token-dialog.png) |
 
-![The Connectors page in dark mode](https://raw.githubusercontent.com/gabrielbav/dsh-connectors/main/docs/screenshots/connectors-dark.png)
+![The Connectors page in dark mode](https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-connectors/docs/screenshots/connectors-dark.png)
 
 | Connector | Authorization | Server |
 |---|---|---|
@@ -107,9 +107,9 @@ export function apply(ctx: { connectors: ConnectorsService; effect(run: () => ()
 }
 ```
 
-[`examples/connector-example`](https://github.com/gabrielbav/dsh-connectors/tree/main/examples/connector-example) is a complete, minimal connector package that follows the standard below. Linking it into a profile adds an "Example" row, and removing it takes the row away.
+[`examples/connector-example`](https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-connectors/examples/connector-example) is a complete, minimal connector package that follows the standard below. Linking it into a profile adds an "Example" row, and removing it takes the row away.
 
-The full contract is in [`src/host/api.ts`](https://github.com/gabrielbav/dsh-connectors/blob/main/src/host/api.ts):
+The full contract is in [`src/host/api.ts`](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-connectors/src/host/api.ts):
 
 - `oauth` takes `client` for a pre-registered app, plus `scopes`, `identify` and `setupUrl`.
 - `token` takes form `fields` and a `verify` that checks the values and returns the credential to store.
@@ -131,7 +131,7 @@ The full contract is in [`src/host/api.ts`](https://github.com/gabrielbav/dsh-co
 
 It also refuses a package with a browser half (`dsh.client`): a connector is a Host-side definition, so it has no reason to change the UI.
 
-The check runs on the registry manifest before anything downloads, and again at install time. The install then goes through the harness plugin manager with the exact version (`expected`, `saveExact`). Registered install gates (such as [Airlock](https://github.com/gabrielbav/dsh-plugin-airlock)) scan it first. A gate's review is shown on the page with an **Install anyway**, and a block stops the install.
+The check runs on the registry manifest before anything downloads, and again at install time. The install then goes through the harness plugin manager with the exact version (`expected`, `saveExact`). Registered install gates (such as [Airlock](https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-plugin-airlock)) scan it first. A gate's review is shown on the page with an **Install anyway**, and a block stops the install.
 
 The standard filters out packages that are not connectors. It is not a security boundary: a connector package is code that runs in the Host with your permissions, which is why the install gate matters.
 

@@ -5,11 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gabrielbav/dsh-plugin-airlock.git"
+    "url": "git+https://github.com/gabrielbav/dsh-workspace.git",
+    "directory": "Plugins/dsh-plugin-airlock"
   },
-  "homepage": "https://github.com/gabrielbav/dsh-plugin-airlock#readme",
+  "homepage": "https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-plugin-airlock#readme",
   "bugs": {
-    "url": "https://github.com/gabrielbav/dsh-plugin-airlock/issues"
+    "url": "https://github.com/gabrielbav/dsh-workspace/issues"
   },
   "keywords": [
     "deepseek-harness",

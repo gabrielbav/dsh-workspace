@@ -1,12 +1,18 @@
-name: CI
+name: dsh-code
 
 on:
   push:
     branches: [main]
+    paths: ['Plugins/dsh-code/**', '.github/workflows/dsh-code.yml']
   pull_request:
+    paths: ['Plugins/dsh-code/**', '.github/workflows/dsh-code.yml']
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: Plugins/dsh-code
 
 jobs:
   unit:
@@ -20,6 +26,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          cache-dependency-path: Plugins/dsh-code/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run typecheck
@@ -37,6 +44,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          cache-dependency-path: Plugins/dsh-code/pnpm-lock.yaml
       - name: Install gVisor and register runsc with Docker
         run: |
           curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg

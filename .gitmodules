@@ -1,0 +1,7 @@
+[submodule "Fork/deepseek-harness"]
+	path = Fork/deepseek-harness
+	url = https://github.com/gabrielbav/deepseek-harness.git
+	branch = master
+	# The checkout runs on local/daily, a branch built locally by `make sync`.
+	# The recorded commit is only the master that `make bootstrap` starts from.
+	ignore = all

@@ -5,11 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gabrielbav/dsh-plugin-aws.git"
+    "url": "git+https://github.com/gabrielbav/dsh-workspace.git",
+    "directory": "Plugins/dsh-plugin-aws"
   },
-  "homepage": "https://github.com/gabrielbav/dsh-plugin-aws#readme",
+  "homepage": "https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-plugin-aws#readme",
   "bugs": {
-    "url": "https://github.com/gabrielbav/dsh-plugin-aws/issues"
+    "url": "https://github.com/gabrielbav/dsh-workspace/issues"
   },
   "keywords": [
     "deepseek-harness",

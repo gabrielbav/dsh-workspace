@@ -19,7 +19,7 @@
                                                      └───────────────────────────────────────────────────────────┘
 ```
 
-Docs: [remote VMs (Azure, AWS)](https://github.com/gabrielbav/dsh-code/blob/main/docs/remote.md) · [spec](https://github.com/gabrielbav/dsh-code/blob/main/docs/spec.md) · [design decisions](https://github.com/gabrielbav/dsh-code/blob/main/docs/validation.md) · [plan and open work](https://github.com/gabrielbav/dsh-code/blob/main/docs/plan.md)
+Docs: [remote VMs (Azure, AWS)](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/remote.md) · [spec](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/spec.md) · [design decisions](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/validation.md) · [plan and open work](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/plan.md)
 
 ## What changes in a Code mode session
 
@@ -41,7 +41,7 @@ Chat, models, approvals, streaming, skills and history stay Harness's own. Code 
 2. **Choose Code mode** in the mode selector. A setup notice lists anything missing (Docker, gVisor, the worker image) with how to fix it, and **Build worker image** builds the image for you. Code stays off until every check passes; it never falls back to ordinary Docker.
 3. **Pick a repository and branch** with **+ → Repository** and **+ → Branch**, then send a message. The workspace starts with that first message.
 
-Rather not run Docker on this computer? Point Code at your own VM: **Settings > Code > Remote Docker host**, then **Prepare the VM**. See [docs/remote.md](https://github.com/gabrielbav/dsh-code/blob/main/docs/remote.md) for Azure and AWS, step by step.
+Rather not run Docker on this computer? Point Code at your own VM: **Settings > Code > Remote Docker host**, then **Prepare the VM**. See [docs/remote.md](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/remote.md) for Azure and AWS, step by step.
 
 ## Features
 
@@ -193,7 +193,7 @@ The `code` preset leaves out tools that would act from the host on the agent's b
 - **Windows (WSL2)** is untested.
 - **Host-configured MCP servers** run on the host as before; repository-defined MCP servers are not started for Code sessions.
 - **Choices before the first message** (repository, branch, account) live in memory until the workspace starts.
-- **Not implemented yet:** Remote Control, team deployment, a published digest-pinned worker image (see the [plan](https://github.com/gabrielbav/dsh-code/blob/main/docs/plan.md)).
+- **Not implemented yet:** Remote Control, team deployment, a published digest-pinned worker image (see the [plan](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/plan.md)).
 
 ## Develop
 
@@ -204,7 +204,7 @@ pnpm test             # unit tests
 pnpm run test:docker  # live Docker + gVisor tests; on macOS run with TMPDIR under $HOME
 ```
 
-The remote suite runs against any VM with Docker, gVisor and the worker image; [docs/remote.md](https://github.com/gabrielbav/dsh-code/blob/main/docs/remote.md#testing-code-against-a-remote-host) shows the variables (the Colima VM's own SSH server works too).
+The remote suite runs against any VM with Docker, gVisor and the worker image; [docs/remote.md](https://github.com/gabrielbav/dsh-workspace/blob/main/Plugins/dsh-code/docs/remote.md#testing-code-against-a-remote-host) shows the variables (the Colima VM's own SSH server works too).
 
 The build uses only published packages: `@deepseek-ai/dsh-*@0.2.2-rc.1` for types and the Typert generator, patched (`patches/`) so it recognizes the npm-installed protocol package outside the Harness monorepo.
 

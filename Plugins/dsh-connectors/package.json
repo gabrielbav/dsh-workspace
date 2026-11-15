@@ -5,11 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gabrielbav/dsh-connectors.git"
+    "url": "git+https://github.com/gabrielbav/dsh-workspace.git",
+    "directory": "Plugins/dsh-connectors"
   },
-  "homepage": "https://github.com/gabrielbav/dsh-connectors#readme",
+  "homepage": "https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-connectors#readme",
   "bugs": {
-    "url": "https://github.com/gabrielbav/dsh-connectors/issues"
+    "url": "https://github.com/gabrielbav/dsh-workspace/issues"
   },
   "keywords": [
     "deepseek-harness",

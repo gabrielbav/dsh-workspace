@@ -5,11 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gabrielbav/dsh-plugin-session-delete.git"
+    "url": "git+https://github.com/gabrielbav/dsh-workspace.git",
+    "directory": "Plugins/dsh-plugin-session-delete"
   },
-  "homepage": "https://github.com/gabrielbav/dsh-plugin-session-delete#readme",
+  "homepage": "https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-plugin-session-delete#readme",
   "bugs": {
-    "url": "https://github.com/gabrielbav/dsh-plugin-session-delete/issues"
+    "url": "https://github.com/gabrielbav/dsh-workspace/issues"
   },
   "keywords": [
     "deepseek-harness",

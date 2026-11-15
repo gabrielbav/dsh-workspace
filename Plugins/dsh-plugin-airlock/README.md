@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/gabrielbav/dsh-plugin-airlock/main/icon.svg" width="72" height="72" alt="Airlock">
+<img src="https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-plugin-airlock/icon.svg" width="72" height="72" alt="Airlock">
 
 # Airlock
 
@@ -29,9 +29,9 @@ Wherever Airlock vets an install before it happens, these rules apply. Where it 
 
 <table>
 <tr>
-<td width="33%"><img src="https://raw.githubusercontent.com/gabrielbav/dsh-plugin-airlock/main/docs/install-blocked.png" alt="A malicious skill pack blocked with score 0"></td>
-<td width="33%"><img src="https://raw.githubusercontent.com/gabrielbav/dsh-plugin-airlock/main/docs/install-review.png" alt="A package with dependency advisories waiting for review"></td>
-<td width="33%"><img src="https://raw.githubusercontent.com/gabrielbav/dsh-plugin-airlock/main/docs/install-passed.png" alt="A clean package passed with score 100"></td>
+<td width="33%"><img src="https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-plugin-airlock/docs/install-blocked.png" alt="A malicious skill pack blocked with score 0"></td>
+<td width="33%"><img src="https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-plugin-airlock/docs/install-review.png" alt="A package with dependency advisories waiting for review"></td>
+<td width="33%"><img src="https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-plugin-airlock/docs/install-passed.png" alt="A clean package passed with score 100"></td>
 </tr>
 <tr>
 <td align="center"><b>Blocked:</b> a skill that steals SSH keys</td>
@@ -68,13 +68,13 @@ Turn on the LLM judge and pick a model from **the same list as the chat**: DeepS
 
 You don't paste an API key and there's no URL to set. Airlock forwards the scanners' requests to the chosen DSH model through a private, token-protected endpoint on `127.0.0.1`, so subscription logins work too.
 
-<img src="https://raw.githubusercontent.com/gabrielbav/dsh-plugin-airlock/main/docs/settings-llm.png" alt="Choosing the LLM judge model from the DSH model list" width="720">
+<img src="https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-plugin-airlock/docs/settings-llm.png" alt="Choosing the LLM judge model from the DSH model list" width="720">
 
 ### In the chat too
 
 When the agent installs a plugin for you, green packages install, red ones are refused, and the agent never sees the findings text. With the hook, a package that needs review shows the same report as an approval card. On stock DSH the card shows the score, and the full report is under **Plugins → Airlock → Recent scans**.
 
-<img src="https://raw.githubusercontent.com/gabrielbav/dsh-plugin-airlock/main/docs/chat-review.png" alt="A review approval card in the DSH chat" width="720">
+<img src="https://raw.githubusercontent.com/gabrielbav/dsh-workspace/main/Plugins/dsh-plugin-airlock/docs/chat-review.png" alt="A review approval card in the DSH chat" width="720">
 
 ## Two levels of protection
 

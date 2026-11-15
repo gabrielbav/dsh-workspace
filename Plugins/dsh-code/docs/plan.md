@@ -4,7 +4,7 @@ Status of [spec.md](spec.md) as implemented in this repository, and the open wor
 
 ## Repositories
 
-- **gabrielbav/dsh-code (this repo):** all Code plugin code, docs and tests.
+- **`Plugins/dsh-code` in gabrielbav/dsh-workspace (this folder):** all Code plugin code, docs and tests.
 - **gabrielbav/deepseek-harness:** upstream-only, generic changes. Code no longer needs any: the mode selector replaced the `sidebar.mode` switch and session filter of PR #3 (formerly #2). Nothing Code-specific goes there.
 
 ## Done

@@ -15,16 +15,16 @@
     "isolation",
     "egress-proxy"
   ],
-  "homepage": "https://github.com/gabrielbav/dsh-code#readme",
+  "homepage": "https://github.com/gabrielbav/dsh-workspace/tree/main/Plugins/dsh-code#readme",
   "bugs": {
-    "url": "https://github.com/gabrielbav/dsh-code/issues"
+    "url": "https://github.com/gabrielbav/dsh-workspace/issues"
   },
   "license": "MIT",
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gabrielbav/dsh-code.git",
-    "directory": "packages/dsh-code"
+    "url": "git+https://github.com/gabrielbav/dsh-workspace.git",
+    "directory": "Plugins/dsh-code/packages/dsh-code"
   },
   "engines": {
     "node": ">=24.9.0"
