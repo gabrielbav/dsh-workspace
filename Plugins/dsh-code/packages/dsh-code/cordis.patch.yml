@@ -1,0 +1,139 @@
+# dsh-code bundle patch.
+#
+# Host plane: `code-workspaces` owns Docker + gVisor workspaces and serves the
+# Code UI's Remote API; its client half (`./client`) adds repository and branch
+# pickers (above the composer and in its + menu), the status line and session
+# actions to sessions that choose "Code mode" in the mode selector.
+#
+# Agent plane: the `code` preset keeps the chat experience of the standard
+# preset and swaps execution. `code-execution` isolates `subprocess`, `shell`
+# and `fs`, so bash, search and the file tools inside it see only the
+# container-backed process runtime and the container-backed filesystem.
+# In-process subagents (spawn and fork) compose from the parent's preset
+# generation, so children run in the same container. Tools that would act
+# from the host on the agent's behalf are left out: out-of-process subagent
+# providers (SDK, Claude Code, Codex, ACP), workflows, web fetch (host
+# network), office documents, and plugin management.
+- insert:
+    - id: code-workspaces
+      name: '@gabrielbav/dsh-code'
+
+    - id: preset-code
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: code
+        name: Code mode
+        description: Coding in an isolated Docker + gVisor workspace with its own branch
+        order: 2
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a coding agent powered by the {{model}} model. You work in an isolated checkout of the user's repository on a dedicated branch; commands and file edits run inside that sandbox. To show a web app, start it in the background and tell the user to open the Preview tab; never give localhost links, which point at the user's own computer, not the sandbox. The session's file policy may say danger-full-access, but in Code mode the sandbox never opens: everything still runs inside the container and checkout. A '[sandbox: ...]' message is policy, not a broken file or command: report it and ask the user to change the permission if needed. Network access goes through an egress proxy with an allowlist. A refused host shows as '[sandbox: network access to <host> denied by the Code egress policy]' for plain HTTP, and for HTTPS as 'CONNECT tunnel failed, response 403' (curl, git) or a 403 / E403 from a package manager. When the task needs that host, take the host name from the URL that failed and call request_network_access with it and a short reason; retry only if the user allows it. Do not try to get around the proxy. If a command or file access is refused because no workspace is ready, the session has no repository yet: ask the user to choose one with + → Repository (and a branch with + → Branch); the workspace starts with their next message.
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: code-execution
+            name: cordis:group
+            group: true
+            isolate:
+              subprocess: true
+              shell: true
+              fs: true
+            config:
+              - id: code-subprocess
+                name: '@gabrielbav/dsh-code/subprocess'
+              - id: code-fs
+                name: '@gabrielbav/dsh-code/fs'
+              - id: code-bash
+                name: '@deepseek-ai/dsh-bash-local'
+              - id: tool-bash
+                name: '@deepseek-ai/dsh-tool-bash'
+              - id: tool-fs
+                name: '@deepseek-ai/dsh-tool-fs'
+                config:
+                  applyPatch: false
+              - id: tool-fs-search
+                name: '@deepseek-ai/dsh-tool-fs-search'
+                config:
+                  sampleOverCapGlobResults: false
+          # Prompt-file loaders get their own fs: the session checkout through the container (a repository
+          # CLAUDE.md or skill symlinked to ~/.aws/credentials resolves inside the sandbox), the user's and the
+          # Harness's own files read-only from the host, nothing else of the Code data folder, and no writes.
+          - id: code-prompt-files
+            name: cordis:group
+            group: true
+            isolate:
+              fs: true
+            config:
+              - id: code-prompt-fs
+                name: '@gabrielbav/dsh-code/prompt-fs'
+              - id: agent-instructions
+                name: '@deepseek-ai/dsh-agent-instructions'
+                config:
+                  maxBytes: 65536
+              - id: skill-filesystem
+                name: '@deepseek-ai/dsh-skill-filesystem'
+                config:
+                  watch: false
+              - id: tool-skill
+                name: '@deepseek-ai/dsh-tool-skill'
+          # Background jobs (a dev server, a watcher): the job record lives in the Host-wide jobs service, while the
+          # process itself is started by the bash tool above, inside the container. This row only gives the agent
+          # job_output, job_list and job_kill; it registers nothing Host-wide.
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          # request_network_access: the agent asks, the user decides on the Harness approval card, and an approved
+          # host is added to this session's egress allowlist only.
+          - id: code-network-tool
+            name: '@gabrielbav/dsh-code/network-tool'
+          - id: command-goal
+            name: '@deepseek-ai/dsh-command-goal'
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          # The subagent runtime and its spawn/fork providers are Host-wide rows of the base bundle;
+          # registering them again here breaks the preset ("subagents" is already registered).
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+            config:
+              interrupt: false
+          # No agentPreset/allowedAgentPresets: the model cannot pick another
+          # preset, so every child inherits `code` and its container.
+          - id: tool-subagent
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: spawn
+              toolName: subagent
+          - id: tool-subagent-fork
+            name: '@deepseek-ai/dsh-tool-subagent'
+            config:
+              provider: fork
+              toolName: subagent_fork
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000

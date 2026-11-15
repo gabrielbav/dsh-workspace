@@ -1,0 +1,10 @@
+node_modules/
+lib/
+*.tsbuildinfo
+**/worker/build-ca.crt
+coverage/
+*.tgz
+**/worker/fs-helper.js
+**/worker/browser-bridge.js
+packages/dsh-code/README.md
+packages/dsh-code/LICENSE

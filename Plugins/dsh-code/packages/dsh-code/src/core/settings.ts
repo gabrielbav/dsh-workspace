@@ -1,0 +1,188 @@
+/**
+ * Settings > Code: validation of the values the UI may change. These are
+ * control-plane operations reached only through the authenticated Code UI;
+ * nothing in a workspace or in the agent's tools can call them.
+ */
+import { normalizeHost } from '../egress/policy.ts'
+import type { CodeSettings } from '../types.ts'
+import { environmentLines, EnvironmentError, parseEnvironment } from './environment.ts'
+import { unsafeFolderReason } from './mounts.ts'
+import { RemoteError, validateRemote, viaLabel, validateVia, type RemoteVia } from './remote.ts'
+
+/** Structured validation failure naming the field. */
+export class SettingsError extends Error {
+  /**
+   * @param field - offending field.
+   * @param message - what is wrong.
+   */
+  constructor(readonly field: keyof CodeSettings, message: string) {
+    super(`${field}: ${message}`)
+    this.name = 'SettingsError'
+  }
+}
+
+const IMAGE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[\w][\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$|^[a-z0-9.-]+(?::\d+)?\/[a-z0-9._/-]+(?::[\w][\w.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/
+
+function number(field: keyof CodeSettings, value: unknown, min: number, max: number, integer = true): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+    throw new SettingsError(field, `must be ${integer ? 'an integer' : 'a number'} from ${min} to ${max}`)
+  }
+  return value
+}
+
+function ports(field: keyof CodeSettings, value: unknown): number[] {
+  if (!Array.isArray(value) || value.length > 64) throw new SettingsError(field, 'must be a list of at most 64 ports')
+  return [...new Set(value.map(port => number(field, port, 1, 65535)))].sort((a, b) => a - b)
+}
+
+/**
+ * Validate and normalize settings from the UI.
+ * @param input - untrusted settings.
+ * @returns normalized settings.
+ * @throws SettingsError for the first invalid field.
+ */
+export function validateSettings(input: CodeSettings): CodeSettings {
+  if (input.network !== 'allowlist' && input.network !== 'none' && input.network !== 'open') throw new SettingsError('network', 'must be allowlist, none or open')
+  if (input.storage !== 'auto' && input.storage !== 'bind' && input.storage !== 'volume') throw new SettingsError('storage', 'must be auto, bind or volume')
+  for (const field of ['remoteHost', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey'] as const) {
+    if (typeof input[field] !== 'string') throw new SettingsError(field, 'must be text')
+  }
+  if (input.remoteNetwork !== 'public' && input.remoteNetwork !== 'private') throw new SettingsError('remoteNetwork', 'must be public or private')
+  if (typeof input.remotePublicHost !== 'string') throw new SettingsError('remotePublicHost', 'must be text')
+  const remotePublicHost = input.remotePublicHost.trim()
+  if (remotePublicHost !== '') {
+    try {
+      validateRemote({ host: remotePublicHost, port: 22, user: 'x', identityFile: '/x', hostKey: `SHA256:${'A'.repeat(43)}` })
+    } catch {
+      throw new SettingsError('remotePublicHost', 'must be a host name or an IP address')
+    }
+  }
+  if (input.remoteVia !== 'direct' && input.remoteVia !== 'aws-ssm' && input.remoteVia !== 'azure-bastion') throw new SettingsError('remoteVia', 'must be direct, aws-ssm or azure-bastion')
+  for (const field of VIA_FIELDS) {
+    if (typeof input[field] !== 'string') throw new SettingsError(field, 'must be text')
+  }
+  let remote = { host: '', port: typeof input.remotePort === 'number' ? input.remotePort : 22, user: input.remoteUser.trim(), identityFile: input.remoteIdentityFile.trim(), hostKey: input.remoteHostKey.trim() }
+  const via = remoteViaOf(input)
+  if (remoteActive(input)) {
+    try {
+      const validVia = validateVia(via)
+      remote = validateRemote({ ...remote, host: viaLabel(validVia) ?? input.remoteHost, via: validVia })
+    } catch (error) {
+      if (error instanceof RemoteError) throw new SettingsError(via.kind === 'direct' || error.field !== 'host' ? REMOTE_FIELD_OF[error.field === 'connection' ? 'host' : error.field] : 'remoteVia', error.message)
+      throw error
+    }
+  }
+  if (!Array.isArray(input.allow) || input.allow.length > 512) throw new SettingsError('allow', 'must be a list of at most 512 host names')
+  const allow = [...new Set(input.allow.map((pattern) => {
+    const wildcard = typeof pattern === 'string' && pattern.startsWith('*.')
+    const host = typeof pattern === 'string' ? normalizeHost(wildcard ? pattern.slice(2) : pattern) : undefined
+    if (host === undefined || /^\d+(\.\d+){3}$/.test(host)) throw new SettingsError('allow', `"${String(pattern)}" is not a host name or *.domain pattern`)
+    return wildcard ? `*.${host}` : host
+  }))]
+  if (!Array.isArray(input.privateAllow) || input.privateAllow.length > 64) throw new SettingsError('privateAllow', 'must be a list of at most 64 host:port entries')
+  const privateAllow = [...new Set(input.privateAllow.map((entry) => {
+    const match = typeof entry === 'string' ? /^([^:\s]+):(\d{1,5})$/.exec(entry.trim()) : null
+    if (match === null || Number(match[2]) < 1 || Number(match[2]) > 65535) throw new SettingsError('privateAllow', `"${String(entry)}" is not host:port`)
+    return `${match[1]!.toLowerCase()}:${Number(match[2])}`
+  }))]
+  if (typeof input.workerImage !== 'string' || !IMAGE.test(input.workerImage)) throw new SettingsError('workerImage', 'is not a Docker image reference')
+  if (!Array.isArray(input.disabledAccounts) || input.disabledAccounts.length > 64) throw new SettingsError('disabledAccounts', 'must be a list of at most 64 GitHub logins')
+  const disabledAccounts = [...new Set(input.disabledAccounts.map((login) => {
+    if (typeof login !== 'string' || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login)) throw new SettingsError('disabledAccounts', `"${String(login)}" is not a GitHub login`)
+    return login
+  }))]
+  if (typeof input.newBranch !== 'boolean') throw new SettingsError('newBranch', 'must be true or false')
+  for (const field of ['readOnlyWorkspace', 'dependencyCache', 'lockdown', 'previewEnabled', 'isolatedBrowser'] as const) {
+    if (typeof input[field] !== 'boolean') throw new SettingsError(field, 'must be true or false')
+  }
+  if (!Array.isArray(input.readOnlyFolders) || input.readOnlyFolders.length > 32) throw new SettingsError('readOnlyFolders', 'must be a list of at most 32 folders')
+  const readOnlyFolders = [...new Set(input.readOnlyFolders.map((folder) => {
+    const reason = typeof folder === 'string' ? unsafeFolderReason(folder) : 'must be a path'
+    if (reason !== undefined) throw new SettingsError('readOnlyFolders', `"${String(folder)}": ${reason}`)
+    return folder
+  }))]
+  if (!Array.isArray(input.environment)) throw new SettingsError('environment', 'must be a list of NAME=value lines')
+  let environment: string[]
+  try {
+    environment = environmentLines(parseEnvironment(input.environment))
+  } catch (error) {
+    throw new SettingsError('environment', error instanceof EnvironmentError ? error.message : String(error))
+  }
+  return {
+    network: input.network,
+    allow,
+    privateAllow,
+    ports: ports('ports', input.ports),
+    cpus: number('cpus', input.cpus, 0.25, 128, false),
+    memoryMb: number('memoryMb', input.memoryMb, 256, 1024 * 1024),
+    pids: number('pids', input.pids, 64, 1 << 20),
+    tmpMb: number('tmpMb', input.tmpMb, 16, 1024 * 1024),
+    maxWorkspaces: number('maxWorkspaces', input.maxWorkspaces, 1, 1024),
+    workerImage: input.workerImage,
+    previewPorts: ports('previewPorts', input.previewPorts),
+    disabledAccounts,
+    newBranch: input.newBranch,
+    shmMb: number('shmMb', input.shmMb, 16, 65536),
+    readOnlyWorkspace: input.readOnlyWorkspace,
+    dependencyCache: input.dependencyCache,
+    readOnlyFolders,
+    environment,
+    lockdown: input.lockdown,
+    previewEnabled: input.previewEnabled,
+    isolatedBrowser: input.isolatedBrowser,
+    storage: input.storage,
+    remoteHost: remote.host, remotePort: remote.port, remoteUser: remote.user, remoteIdentityFile: remote.identityFile, remoteHostKey: remote.hostKey,
+    remoteNetwork: input.remoteNetwork, remotePublicHost,
+    remoteVia: input.remoteVia,
+    ...Object.fromEntries(VIA_FIELDS.map(field => [field, input[field].trim()])) as Pick<CodeSettings, typeof VIA_FIELDS[number]>,
+  }
+}
+
+/** Config fields Settings > Code edits; all apply without restarting Harness. */
+export const SETTINGS_FIELDS = ['network', 'allow', 'privateAllow', 'ports', 'cpus', 'memoryMb', 'pids', 'tmpMb', 'maxWorkspaces', 'workerImage', 'previewPorts', 'disabledAccounts', 'newBranch', 'shmMb', 'readOnlyWorkspace', 'dependencyCache', 'readOnlyFolders', 'environment', 'lockdown', 'previewEnabled', 'isolatedBrowser', 'storage'] as const satisfies ReadonlyArray<keyof CodeSettings>
+
+/** Remote Docker host fields: saved from Settings > Code, but changing them reloads Code instead of applying live. */
+export const REMOTE_FIELDS = ['remoteHost', 'remotePort', 'remoteUser', 'remoteIdentityFile', 'remoteHostKey', 'remoteNetwork', 'remotePublicHost', 'remoteVia', 'remoteAwsInstanceId', 'remoteAwsRegion', 'remoteAwsProfile', 'remoteAzureBastion', 'remoteAzureResourceGroup', 'remoteAzureVmId', 'remoteAzureSubscription'] as const satisfies ReadonlyArray<keyof CodeSettings>
+
+const REMOTE_FIELD_OF = { host: 'remoteHost', port: 'remotePort', user: 'remoteUser', identityFile: 'remoteIdentityFile', hostKey: 'remoteHostKey', via: 'remoteVia' } as const
+
+/** Text fields of the Session Manager and Bastion paths. */
+const VIA_FIELDS = ['remoteAwsInstanceId', 'remoteAwsRegion', 'remoteAwsProfile', 'remoteAzureBastion', 'remoteAzureResourceGroup', 'remoteAzureVmId', 'remoteAzureSubscription'] as const
+
+/**
+ * The connection path the settings describe (not yet validated).
+ * @param s - remote settings.
+ * @returns the path.
+ */
+export function remoteViaOf(s: Pick<CodeSettings, 'remoteVia' | typeof VIA_FIELDS[number]>): RemoteVia {
+  if (s.remoteVia === 'aws-ssm') return { kind: 'aws-ssm', instanceId: s.remoteAwsInstanceId, region: s.remoteAwsRegion, profile: s.remoteAwsProfile }
+  if (s.remoteVia === 'azure-bastion') return { kind: 'azure-bastion', bastion: s.remoteAzureBastion, resourceGroup: s.remoteAzureResourceGroup, vmId: s.remoteAzureVmId, subscription: s.remoteAzureSubscription }
+  return { kind: 'direct' }
+}
+
+/**
+ * Whether the settings turn the remote Docker host on: a host for a direct path, an instance or VM for the others.
+ * @param s - remote settings.
+ * @returns true when sandboxes run on the VM.
+ */
+export function remoteActive(s: Pick<CodeSettings, 'remoteHost' | 'remoteVia' | 'remoteAwsInstanceId' | 'remoteAzureVmId'>): boolean {
+  if (s.remoteVia === 'aws-ssm') return s.remoteAwsInstanceId.trim() !== ''
+  if (s.remoteVia === 'azure-bastion') return s.remoteAzureVmId.trim() !== ''
+  return s.remoteHost.trim() !== ''
+}
+
+/**
+ * Whether two configs differ only in live-applicable settings.
+ * @param current - running config.
+ * @param next - candidate config.
+ * @returns true when every other field is unchanged.
+ */
+export function onlySettingsChanged(current: object, next: object): boolean {
+  const live = new Set<string>(SETTINGS_FIELDS)
+  const keys = new Set([...Object.keys(current), ...Object.keys(next)])
+  for (const key of keys) {
+    if (live.has(key)) continue
+    if (JSON.stringify((current as Record<string, unknown>)[key]) !== JSON.stringify((next as Record<string, unknown>)[key])) return false
+  }
+  return true
+}

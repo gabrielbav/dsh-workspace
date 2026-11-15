@@ -1,0 +1,156 @@
+{
+  "name": "@gabrielbav/dsh-code",
+  "version": "0.4.0",
+  "description": "Code mode for DeepSeek Harness: per-session Docker + gVisor workspaces with repository and branch selection",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh",
+    "code-mode",
+    "coding-agent",
+    "sandbox",
+    "gvisor",
+    "docker",
+    "github",
+    "isolation",
+    "egress-proxy"
+  ],
+  "homepage": "https://github.com/gabrielbav/dsh-code#readme",
+  "bugs": {
+    "url": "https://github.com/gabrielbav/dsh-code/issues"
+  },
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gabrielbav/dsh-code.git",
+    "directory": "packages/dsh-code"
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "scripts": {
+    "prepack": "node -e \"const fs=require('node:fs'); for (const f of ['lib/host/workspaces-service.js','lib/client.js','worker/fs-helper.js','worker/browser-bridge.js']) fs.accessSync(f); for (const f of ['README.md','LICENSE']) fs.copyFileSync('../../'+f, f)\"",
+    "postpack": "node -e \"for (const f of ['README.md','LICENSE']) require('node:fs').rmSync(f, { force: true })\""
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "lib/host/workspaces-service.js",
+  "types": "lib/types/host/workspaces-service.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/host/workspaces-service.d.ts",
+      "default": "./lib/host/workspaces-service.js"
+    },
+    "./subprocess": {
+      "types": "./lib/types/host/subprocess-docker.d.ts",
+      "default": "./lib/host/subprocess-docker.js"
+    },
+    "./fs": {
+      "types": "./lib/types/host/fs-container.d.ts",
+      "default": "./lib/host/fs-container.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./types": {
+      "types": "./lib/types/types.d.ts"
+    },
+    "./prompt-fs": {
+      "types": "./lib/types/host/fs-prompt.d.ts",
+      "default": "./lib/host/fs-prompt.js"
+    },
+    "./network-tool": {
+      "types": "./lib/types/host/network-tool.d.ts",
+      "default": "./lib/host/network-tool.js"
+    }
+  },
+  "files": [
+    "lib",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
+    "lib/typert.remote-client.js",
+    "lib/typert.remote-client.d.ts",
+    "lib/typert.remote-client.d.ts.map",
+    "cordis.patch.yml",
+    "worker/Dockerfile",
+    "worker/fs-helper.js",
+    "worker/browser-bridge.js",
+    "README.md",
+    "LICENSE",
+    "!lib/**/*.tsbuildinfo",
+    "!lib/*.tsbuildinfo"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "dependencies": {
+    "zod": "4.6.6"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-fs": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-fs-local": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-subprocess-local": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-remotes": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-locale": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-store": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-fs": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-fs-local": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-typert-generator": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-working-directory": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-workspace": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "@types/js-yaml": "4.0.9",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "js-yaml": "4.1.0",
+    "react": "^19.0.0",
+    "tsdown": "0.23.7",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
