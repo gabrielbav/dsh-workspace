@@ -121,7 +121,7 @@ sudo runsc install && sudo systemctl restart docker
 ```sh
 pnpm install && pnpm run build
 (cd packages/dsh-code && pnpm pack --pack-destination ../..)
-dsh plugin --profile web add ./gabrielbav-dsh-code-0.4.0.tgz
+dsh plugin --profile web add ./gabrielbav-dsh-code-0.4.1.tgz
 ```
 
 The package declares a Harness bundle, so `dsh plugin add` appends it to the profile's bundle list. Its `@deepseek-ai/*` dependencies are peers satisfied by the running Harness.

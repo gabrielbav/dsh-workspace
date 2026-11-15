@@ -1,6 +1,6 @@
 {
   "name": "@gabrielbav/dsh-plugin-aws",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AWS for DeepSeek Harness: switch the official AWS MCP servers (awslabs) on and off by group or one by one from Settings → AWS",
   "license": "MIT",
   "repository": {
