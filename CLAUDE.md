@@ -148,7 +148,7 @@ Each setup is a generated profile (`dsh-pure`, `dsh-all`, `dsh-<names>`). It is 
 Settings in a profile's own `cordis.patch.yml` (model, locale, `requireInstallGate`) stay in that profile. A generated profile starts from the template defaults. Settings that should apply to every profile go in `$DSH_HOME/cordis.patch.yml`, which is layered over each profile's own patch file.
 
 - The web profile lives at `~/.dsh/profiles/web`.
-- Airlock is installed there as `link:` to `Plugins/dsh-plugin-airlock`. Renaming or moving a plugin folder breaks every profile that links it. Update the `Makefile` registry and run `make reset`.
+- Airlock is installed there as `link:` to `Plugins/dsh-plugin-airlock`. Profiles store `link:` paths as absolute paths. After cloning or moving this repo to another folder, run `make relink` (`make bootstrap` runs it): it repoints every profile's missing `.../Plugins/<name>` links at this checkout and reinstalls that profile. Renaming a plugin folder is different: update the `Makefile` registry and run `make reset`, then fix `web` by hand.
 - After rebuilding a plugin, restart dsh.
 - Other plugins: `dsh plugin --profile <name> add -w <npm name or link:/abs/path>`. Without `-w`, pnpm refuses (`ERR_PNPM_ADDING_TO_ROOT`), because each profile is its own pnpm workspace root. `add` also appends the bundle to the profile's `dsh.profile.bundles`.
 - The web profile's `cordis.patch.yml` sets `requireInstallGate: true`. Plugins cannot be installed while the gate is missing, so bootstrapping or upgrading airlock needs that flag removed for a while.
