@@ -16,7 +16,7 @@ Some steps below are marked as the maintainer's (`gabrielbav`): pushing to the f
 - Never run `git submodule update` on an existing checkout: it detaches the fork from `local/daily`.
 - The fork needs a plain `.git` directory. A `--recurse-submodules` clone keeps it under `.git/modules` with `core.worktree`, and the harness's lefthook postinstall then fails `pnpm install`. `make bootstrap` clones the fork itself when it is missing, and moves the git dir into place when it finds the submodule layout.
 - `ignore = all` does not stop `git add -A` or `git commit -a` from recording the fork's current commit (`local/daily`). The Makefile marks the gitlink `skip-worktree` (`make build`, `make bootstrap`, `make start*`) so `git add` leaves it alone; in a new clone, run `git update-index --skip-worktree Fork/deepseek-harness` before the first `git add -A`. Before pushing, `git ls-tree HEAD Fork/deepseek-harness` must show a commit that is on the fork's `origin/master`.
-- To move the recorded commit (rarely needed, for example after a big upstream release), stage it explicitly: `git update-index --cacheinfo 160000,<master sha>,Fork/deepseek-harness`. Never record a `local/daily` commit; nobody else can fetch it.
+- To move the recorded commit (rarely needed, for example after a big upstream release), stage it explicitly: `git update-index --cacheinfo 160000,<master sha>,Fork/deepseek-harness && git update-index --skip-worktree Fork/deepseek-harness`. `--cacheinfo` clears the skip-worktree flag, so without the second command the next `git add -A` records `local/daily` again. Never record a `local/daily` commit; nobody else can fetch it.
 - Fork commits and pushes happen inside `Fork/deepseek-harness`, against the fork's own remote.
 
 ## Layout
