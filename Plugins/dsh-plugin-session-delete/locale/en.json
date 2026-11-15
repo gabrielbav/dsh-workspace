@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session delete",
+    "description": "Delete sessions and workspaces permanently: a Delete session action on every session row, and Delete workspace and sessions on every workspace."
+  }
+}
