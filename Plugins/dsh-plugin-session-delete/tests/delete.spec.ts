@@ -22,6 +22,8 @@ interface Fixture {
   pinned: string[]
   activity: Map<string, readonly { kind: string }[]>
   release: { fn: ((id: string) => Promise<ReleaseResult>) | undefined }
+  /** Sessions the deleter asked to stop. */
+  stopped: string[]
 }
 
 /** Store one Session folder under `<root>/<project>/<id>/session.v4.jsonl`. */
@@ -45,6 +47,7 @@ function fixture(): Fixture {
     pinned: [] as string[],
     activity: new Map<string, readonly { kind: string }[]>(),
     release: { fn: undefined as ((id: string) => Promise<ReleaseResult>) | undefined },
+    stopped: [] as string[],
   } as Fixture
   f.deps = {
     persistence: {
@@ -82,6 +85,16 @@ function workspace(f: Fixture, id: string, ids: string[]): void {
   f.workspaces.set(id, entity)
 }
 
+/** Let the deleter stop sessions; `quiets` says whether a stop makes the session go quiet. */
+function withStop(f: Fixture, quiets: boolean): void {
+  f.deps = {
+    ...f.deps,
+    stop: async (id) => { f.stopped.push(id); if (quiets) f.activity.delete(id) },
+    pause: async () => {},
+    stopWaitMs: 1000,
+  }
+}
+
 describe('deleteSession', () => {
   it('deletes a cold session with its subagent sessions and cleans the registry', async () => {
     const f = fixture()
@@ -112,6 +125,92 @@ describe('deleteSession', () => {
       .toEqual({ deleted: [], kept: [{ sessionId: 'busy', reason: 'running', detail: 'schedule, job' }] })
     expect(await exists(dir)).toBe(true)
     expect(f.removed).toEqual([])
+  })
+
+  it('stops a running session, then deletes it', async () => {
+    const f = fixture()
+    const dir = await store(f, { id: 'busy', cwd: '/w' })
+    f.activity.set('busy', [{ kind: 'turn' }, { kind: 'job' }])
+    withStop(f, true)
+    expect(await sessionDeleter(f.deps).deleteSession('busy')).toEqual({ deleted: ['busy'], kept: [] })
+    expect(f.stopped).toEqual(['busy'])
+    expect(await exists(dir)).toBe(false)
+  })
+
+  it('stops the running subagent sessions of a session too', async () => {
+    const f = fixture()
+    await store(f, { id: 'parent', cwd: '/w' })
+    await store(f, { id: 'child', cwd: '/w', parentSession: 'parent', origin: 'subagent' })
+    f.activity.set('parent', [{ kind: 'turn' }])
+    f.activity.set('child', [{ kind: 'turn' }])
+    withStop(f, true)
+    expect((await sessionDeleter(f.deps).deleteSession('parent')).deleted).toEqual(['parent', 'child'])
+    expect(f.stopped).toEqual(['parent', 'child'])
+  })
+
+  it('does not stop an idle session', async () => {
+    const f = fixture()
+    await store(f, { id: 'idle', cwd: '/w' })
+    withStop(f, true)
+    await sessionDeleter(f.deps).deleteSession('idle')
+    expect(f.stopped).toEqual([])
+  })
+
+  it('keeps a session that does not go quiet after the stop', async () => {
+    const f = fixture()
+    const dir = await store(f, { id: 'stubborn', cwd: '/w' })
+    f.activity.set('stubborn', [{ kind: 'job' }])
+    withStop(f, false)
+    expect((await sessionDeleter(f.deps).deleteSession('stubborn')).kept)
+      .toEqual([{ sessionId: 'stubborn', reason: 'running', detail: 'job' }])
+    expect(f.stopped).toEqual(['stubborn'])
+    expect(await exists(dir)).toBe(true)
+  })
+
+  it('waits while the stop takes effect', async () => {
+    const f = fixture()
+    await store(f, { id: 'slow', cwd: '/w' })
+    f.activity.set('slow', [{ kind: 'turn' }])
+    let pauses = 0
+    f.deps = {
+      ...f.deps, stopWaitMs: 2000,
+      stop: async () => {},
+      pause: async () => { if (++pauses === 3) f.activity.delete('slow') },
+    }
+    expect((await sessionDeleter(f.deps).deleteSession('slow')).deleted).toEqual(['slow'])
+    expect(pauses).toBe(3)
+  })
+
+  it('reports the stack\'s queued answer as queued, not as a failure', async () => {
+    const f = fixture()
+    const dir = await store(f, { id: 'loaded', cwd: '/w' })
+    f.live.add('loaded')
+    const sentence = 'It is archived now, and will be deleted for good the next time this harness restarts.'
+    f.release.fn = async () => { throw Object.assign(new Error(sentence), { code: 'AGENTIC_QUEUED', queued: true }) }
+    expect(await sessionDeleter(f.deps).deleteSession('loaded'))
+      .toEqual({ deleted: [], kept: [{ sessionId: 'loaded', reason: 'queued', detail: sentence }] })
+    expect(await exists(dir)).toBe(true)
+    expect(f.removed).toEqual([])
+  })
+
+  it('still reports any other error from the release as a failure', async () => {
+    const f = fixture()
+    await store(f, { id: 'loaded', cwd: '/w' })
+    f.live.add('loaded')
+    f.release.fn = async () => { throw new Error('boom') }
+    expect((await sessionDeleter(f.deps).deleteSession('loaded')).kept)
+      .toEqual([{ sessionId: 'loaded', reason: 'failed', detail: 'boom' }])
+  })
+
+  it('keeps a workspace while one of its sessions is queued', async () => {
+    const f = fixture()
+    await store(f, { id: 'cold', cwd: '/w' })
+    await store(f, { id: 'loaded', cwd: '/w' })
+    f.live.add('loaded')
+    workspace(f, 'ws', ['cold', 'loaded'])
+    f.release.fn = async () => { throw Object.assign(new Error('queued'), { code: 'AGENTIC_QUEUED' }) }
+    const report = await sessionDeleter(f.deps).deleteWorkspace('ws')
+    expect(report).toEqual({ deleted: ['cold'], kept: [{ sessionId: 'loaded', reason: 'queued', detail: 'queued' }], workspaceDeleted: false })
   })
 
   it('needs a restart for a live session when the controller cannot release it', async () => {

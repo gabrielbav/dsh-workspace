@@ -6,6 +6,7 @@ import type { SessionRowProps, Translate } from './dsh.ts'
 import type { SessionDeleteKey } from './locales.ts'
 import type { SessionDeleteApi } from './rpc.ts'
 import type { DeleteRequest, Store } from './store.ts'
+import { hasUnpushedWork } from './unpushed.ts'
 
 /** Translate bound to this plugin's namespace. */
 export type T = Translate<SessionDeleteKey>
@@ -62,6 +63,14 @@ function DeleteForm({ request, t, shared }: { request: DeleteRequest; t: T; shar
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [report, setReport] = useState<DeleteReport | null>(null)
+  const [unpushed, setUnpushed] = useState(false)
+  const sessionId = request.kind === 'session' ? request.sessionId : null
+  useEffect(() => {
+    if (sessionId === null) return undefined
+    let live = true
+    void hasUnpushedWork(sessionId).then((warn) => { if (live) setUnpushed(warn) })
+    return () => { live = false }
+  }, [sessionId])
   const close = (): void => { if (!pending) shared.request.set(null) }
   const confirm = (): void => {
     setPending(true)
@@ -81,6 +90,8 @@ function DeleteForm({ request, t, shared }: { request: DeleteRequest; t: T; shar
   const session = request.kind === 'session'
   const title = t(session ? 'confirm.session.title' : 'confirm.workspace.title')
   const description = t(session ? 'confirm.session.desc' : 'confirm.workspace.desc', { name: request.title })
+  // Everything that was kept is waiting for the next restart: archived now, not a failure.
+  const queued = report !== null && report.kept.length > 0 && report.kept.every(kept => kept.reason === 'queued')
   const footer = report === null
     ? (
         <>
@@ -92,9 +103,18 @@ function DeleteForm({ request, t, shared }: { request: DeleteRequest; t: T; shar
   return (
     <Modal open onClose={close} closeLabel={t('close')} tone="warning" title={title} description={description} footer={footer}>
       {capabilities?.releaseIdle === false && report === null && <p className="dsh-session-delete-note">{t('confirm.restartHint')}</p>}
+      {unpushed && report === null && <p className="dsh-session-delete-error">{t('confirm.unpushed')}</p>}
       {pending && <p className="dsh-session-delete-note" role="status">{t('pending')}</p>}
       {error !== null && <p className="dsh-session-delete-error" role="alert">{error}</p>}
-      {report !== null && (
+      {queued && (
+        <div role="status">
+          <p className="dsh-session-delete-note"><strong>{t('result.queued')}</strong></p>
+          <p className="dsh-session-delete-note">
+            {session ? t('reason.queued') : t('result.workspaceQueued', { deleted: String(report.deleted.length), queued: String(report.kept.length) })}
+          </p>
+        </div>
+      )}
+      {report !== null && !queued && (
         <div role="alert">
           <p className="dsh-session-delete-error">
             {session ? t('result.sessionKept') : t('result.workspaceKept', { deleted: String(report.deleted.length) })}

@@ -7,11 +7,15 @@ DeepSeek Harness can archive sessions but not delete them, and deleting a worksp
 
 Both ask for confirmation. Deleting a session also deletes its subagent sessions. If the session is open in the conversation view, DSH switches to a new conversation.
 
+- **A running session is stopped first.** The plugin asks the owners of its work (the turn, background jobs, the schedule, subagents) to stop, waits up to 10 seconds for them to go quiet, then deletes. If the work does not stop, the session is kept.
+- **Queued deletes.** When the host cannot unload a session now and answers with an error that has `code = 'AGENTIC_QUEUED'` (or `queued = true`), the dialog shows **Queued**: "Archived now, deleted at the next restart". It is not shown as a failure.
+- **Work that was not pushed.** When the dialog opens for a session, it asks `GET /agentic-stack-assets/code/unpushed?session=<id>`. If the answer is `{ "warn": true }`, the dialog adds one line: "This also deletes work that was not pushed." Any other answer, a 404 included (a host without that address), shows nothing. Plain DSH has no such address, so the line never appears there.
+
 ## What is never deleted
 
 A session is kept, and the dialog says why, when:
 
-- it is **running**: a turn, a subagent, a background job or a schedule is active. Stop it first.
+- it is **running** and did not stop when asked: a turn, a subagent, a background job or a schedule is still active after 10 seconds.
 - its log is **open somewhere else**: another DSH process (Desktop and the CLI share sessions), or a subagent or integration that owns it.
 - it is a **subagent session**: delete its parent instead.
 - the session store is not the standard JSONL folder layout, or a session folder does not look like one. The plugin removes only a folder that sits exactly two levels under the session root, is not a symlink, holds no subfolders, and whose stored header names the session being deleted.
@@ -24,8 +28,8 @@ DSH keeps every session you chatted in loaded until it restarts. To delete one o
 
 | DSH | Sessions not loaded | Idle sessions used since DSH started | Running sessions |
 |---|---|---|---|
-| with `releaseAgent` | deleted | unloaded, then deleted | kept |
-| without it | deleted | kept: "Restart DSH and try again" | kept |
+| with `releaseAgent` | deleted | unloaded, then deleted | stopped, then deleted |
+| without it | deleted | kept: "Restart DSH and try again" | stopped, then kept the same way |
 
 On a DSH without the method, the confirmation dialog says so up front.
 
@@ -56,6 +60,8 @@ pnpm test
 ```
 
 The Host half is one ES module with no runtime dependencies. The browser half is CommonJS wrapped in the DSH page's module-loader factory by `scripts/wrap-client.mjs`. React and `@deepseek-ai/dsh-client-ui-primitives` come from the page.
+
+The browser half also reads the unpushed-work address above; it is the only call outside this plugin's routes.
 
 The Host half answers three owner-only routes: `/api/sessionDelete.capabilities`, `/api/sessionDelete.deleteSession` and `/api/sessionDelete.deleteWorkspace`.
 

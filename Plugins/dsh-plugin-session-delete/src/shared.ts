@@ -2,16 +2,18 @@
 
 /**
  * Why one Session was kept.
- * - `running`: it runs a turn, a subagent, a background job or a schedule.
+ * - `running`: it runs a turn, a subagent, a background job or a schedule, and did not stop when asked to.
  * - `in-use`: its log is open elsewhere, by another DSH process or by a subagent or integration that owns it.
  * - `restart-required`: this DSH keeps it loaded and cannot unload it; restart DSH, or update to a DSH whose
  *   session controller offers `releaseAgent`.
+ * - `queued`: this DSH cannot unload it now; it is archived and will be deleted at the next restart. `detail` holds
+ *   the sentence the stack gave.
  * - `subagent`: it is a subagent's session, deleted together with its parent.
  * - `not-found`: nothing is stored under the id.
  * - `unsupported-storage`: the session store is not the JSONL folder layout this plugin can verify.
  * - `failed`: deleting its files failed; `detail` holds the error.
  */
-export type KeptReason = 'running' | 'in-use' | 'restart-required' | 'subagent' | 'not-found' | 'unsupported-storage' | 'failed'
+export type KeptReason = 'running' | 'in-use' | 'restart-required' | 'queued' | 'subagent' | 'not-found' | 'unsupported-storage' | 'failed'
 
 /** One Session left in place. */
 export interface KeptSession {

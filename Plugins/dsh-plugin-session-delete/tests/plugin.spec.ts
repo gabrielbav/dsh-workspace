@@ -6,6 +6,7 @@ import type { FetchRoute, HostContext, SessionController } from '../src/host/dsh
 function mount(controller?: SessionController) {
   const disposers: (() => void | Promise<void>)[] = []
   const routes = new Map<string, FetchRoute>()
+  const stops: string[] = []
   const ctx: HostContext = {
     sessionPersistence: { list: async () => [], stat: async () => undefined, open: async () => ({ close: async () => {} }), config: { root: '/tmp' } },
     workspaceRegistry: { get: () => undefined, list: () => [], delete: async () => false, pinnedSessionIds: [], unpinSession: async () => {} },
@@ -14,6 +15,7 @@ function mount(controller?: SessionController) {
     logger: { warn: () => {}, info: () => {} },
     get: () => controller,
     emit: () => {},
+    parallel: async (_name, request) => { stops.push(request.sessionId) },
     waterfall: (_name, _request, next) => next(),
     effect: (execute) => { disposers.push(execute()) },
     inject: (_names, callback) => {
@@ -28,7 +30,7 @@ function mount(controller?: SessionController) {
     const response = await post(`/api/${method}`, JSON.stringify({ type: 'client-request', rpcId: 'r1', method, payload }))
     return (await response.json() as { result: { ok: boolean; value?: unknown; error?: { code: string; message: string } } }).result
   }
-  return { routes, post, call, dispose: async () => { for (const dispose of disposers.reverse()) await dispose() } }
+  return { routes, stops, post, call, dispose: async () => { for (const dispose of disposers.reverse()) await dispose() } }
 }
 
 it('exports a function plugin that needs the session and workspace services', () => {
@@ -62,4 +64,11 @@ it('answers deletion requests and refuses malformed ones', async () => {
   expect((await post('/api/sessionDelete.deleteSession', '[]')).status).toBe(400)
   const wrong = await post('/api/sessionDelete.deleteSession', JSON.stringify({ type: 'client-request', method: 'sessionDelete.other', payload: {} }))
   expect(await wrong.json()).toMatchObject({ rpcId: 'invalid-request', result: { ok: false, error: { code: 'gateway/bad-request' } } })
+})
+
+it('asks the owners of a running session to stop it before deleting it', async () => {
+  const { call, stops } = mount()
+  // Nothing is stored here, so the session is reported missing; an idle session is never asked to stop.
+  await call('deleteSession', { sessionId: 'idle' })
+  expect(stops).toEqual([])
 })

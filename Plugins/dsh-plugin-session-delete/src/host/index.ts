@@ -50,6 +50,12 @@ export function apply(ctx: HostContext): void {
     liveHeader: id => ctx.sessions.get(id)?.header,
     isLive: id => ctx.sessions.get(id) !== undefined || ctx.agents.get(id) !== undefined,
     get release() { return release() },
+    // The same request the registry makes when it archives a session with its work: cancels the turn, kills jobs,
+    // stops the schedule. A provider that fails is logged; the activity check afterwards decides.
+    stop: async (id) => {
+      try { await ctx.parallel('workspace/session-stop', { sessionId: id }) }
+      catch (error) { ctx.logger.warn(`session-delete: stopping session ${id} failed`, error) }
+    },
     activity: id => ctx.waterfall('workspace/session-activity', { sessionId: id }, () => Promise.resolve([])),
     removed: (id) => { ctx.emit('api-session/removed', id) },
     warn: (message, error) => { ctx.logger.warn(message, error) },

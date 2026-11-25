@@ -21,6 +21,12 @@ export interface DeleteDeps {
   readonly release: ((id: string) => Promise<ReleaseResult>) | undefined
   /** Work the `workspace/session-activity` providers report for a Session. */
   readonly activity: (id: string) => Promise<readonly SessionActivity[]>
+  /** Ask the owners of a Session's running work to stop it. Without it a running Session is kept. */
+  readonly stop?: (id: string) => Promise<void>
+  /** Wait between two looks at a stopping Session; real time unless a test gives its own. */
+  readonly pause?: (ms: number) => Promise<void>
+  /** How long a stopping Session may take to go quiet. */
+  readonly stopWaitMs?: number
   /** Tell Clients a Session is gone. */
   readonly removed: (id: string) => void
   readonly warn: (message: string, error?: unknown) => void
@@ -35,6 +41,17 @@ class Kept extends Error {
 
 /** Generation files a Session folder may hold: `session.jsonl`, `session.v4.jsonl`, either compressed. */
 const SESSION_FILE = /^session(\.v\d+)?\.jsonl(\.[a-z0-9]+)?$/
+
+/** How often a stopping Session is looked at, and how long it may take by default. */
+const STOP_POLL_MS = 200
+const STOP_WAIT_MS = 10_000
+
+/** The stack's answer when it cannot unload a Session now: it archived it and queued the delete. */
+function isQueued(error: unknown): error is Error {
+  if (!(error instanceof Error)) return false
+  const flags = error as Error & { code?: unknown; queued?: unknown }
+  return flags.code === 'AGENTIC_QUEUED' || flags.queued === true
+}
 
 function activityDetail(activity: readonly SessionActivity[]): string {
   return [...new Set(activity.map(entry => entry.kind))].join(', ')
@@ -74,9 +91,36 @@ export function sessionDeleter(deps: DeleteDeps) {
   const unload = async (id: string): Promise<void> => {
     if (!deps.isLive(id)) return
     if (deps.release === undefined) throw new Kept('restart-required')
-    const result = await deps.release(id)
+    let result: ReleaseResult
+    try { result = await deps.release(id) }
+    catch (error) {
+      if (isQueued(error)) throw new Kept('queued', error.message)
+      throw error
+    }
     if (!result.released && result.reason === 'active') throw new Kept('running', activityDetail(result.activity))
     if (deps.isLive(id)) throw new Kept('in-use')
+  }
+
+  /**
+   * Stop whatever the Sessions run and wait until they are quiet. Returns what still runs, root Session first;
+   * empty when all are quiet.
+   */
+  const quiet = async (ids: readonly string[]): Promise<readonly SessionActivity[]> => {
+    const running = async (): Promise<readonly SessionActivity[]> => {
+      const found: SessionActivity[] = []
+      for (const sessionId of ids) found.push(...await deps.activity(sessionId))
+      return found
+    }
+    let left = await running()
+    if (left.length === 0 || deps.stop === undefined) return left
+    for (const sessionId of ids) if ((await deps.activity(sessionId)).length > 0) await deps.stop(sessionId)
+    const pause = deps.pause ?? (ms => new Promise<void>(done => setTimeout(done, ms)))
+    for (let waited = 0; waited < (deps.stopWaitMs ?? STOP_WAIT_MS); waited += STOP_POLL_MS) {
+      left = await running()
+      if (left.length === 0) return left
+      await pause(STOP_POLL_MS)
+    }
+    return running()
   }
 
   /** The verified folder of one Session, or undefined when nothing is on disk. */
@@ -114,10 +158,10 @@ export function sessionDeleter(deps: DeleteDeps) {
     if (found === undefined) throw new Kept('not-found')
     if (found.origin === 'subagent') throw new Kept('subagent')
     const root = await storeRoot()
-    const activity = await deps.activity(id)
+    const ids = tree(id, await deps.persistence.list())
+    const activity = await quiet(ids)
     if (activity.length > 0) throw new Kept('running', activityDetail(activity))
     await unload(id)
-    const ids = tree(id, await deps.persistence.list())
     for (const child of ids.slice(1)) await unload(child)
 
     const handles: SessionHandle[] = []

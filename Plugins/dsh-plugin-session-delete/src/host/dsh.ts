@@ -82,6 +82,7 @@ export interface HostContext {
   readonly logger: { warn(...args: unknown[]): void; info(...args: unknown[]): void }
   get(name: 'sessionController'): SessionController | undefined
   emit(name: 'api-session/removed', sessionId: string): void
+  parallel(name: 'workspace/session-stop', request: { readonly sessionId: string }): Promise<unknown>
   waterfall(
     name: 'workspace/session-activity',
     request: { readonly sessionId: string },
